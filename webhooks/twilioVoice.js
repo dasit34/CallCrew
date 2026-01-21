@@ -19,6 +19,10 @@ router.post('/voice', async (req, res) => {
   const twiml = new VoiceResponse();
   
   try {
+    // Debug logging
+    console.log('=== INCOMING VOICE WEBHOOK ===');
+    console.log('Request body:', JSON.stringify(req.body, null, 2));
+    
     const {
       CallSid,
       AccountSid,
@@ -32,16 +36,21 @@ router.post('/voice', async (req, res) => {
     } = req.body;
 
     console.log(`Incoming call: ${CallSid} from ${From} to ${To}`);
+    console.log('Looking up business for number:', To);
 
     // Find the business by Twilio phone number
     const business = await Business.findOne({ twilioPhoneNumber: To });
     
     if (!business) {
       console.error(`No business found for number: ${To}`);
+      // Debug: List all businesses
+      const allBusinesses = await Business.find().select('twilioPhoneNumber businessName');
+      console.log('All businesses in DB:', allBusinesses.map(b => ({ name: b.businessName, phone: b.twilioPhoneNumber })));
       twiml.say('Sorry, this number is not configured. Goodbye.');
       twiml.hangup();
       return res.type('text/xml').send(twiml.toString());
     }
+    console.log('Found business:', business.businessName);
 
     // Check if business is active
     if (!business.isActive) {
