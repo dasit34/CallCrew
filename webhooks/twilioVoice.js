@@ -36,10 +36,16 @@ router.post('/voice', async (req, res) => {
     } = req.body;
 
     console.log(`Incoming call: ${CallSid} from ${From} to ${To}`);
-    console.log('Looking up business for number:', To);
+    
+    // Normalize phone number (add + if missing)
+    let normalizedTo = To;
+    if (To && !To.startsWith('+')) {
+      normalizedTo = '+' + To;
+    }
+    console.log('Looking up business for number:', normalizedTo);
 
     // Find the business by Twilio phone number
-    const business = await Business.findOne({ twilioPhoneNumber: To });
+    const business = await Business.findOne({ twilioPhoneNumber: normalizedTo });
     
     if (!business) {
       console.error(`No business found for number: ${To}`);
