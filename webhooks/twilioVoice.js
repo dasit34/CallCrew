@@ -8,9 +8,34 @@ const Call = require('../models/Call');
 const IndustryTemplate = require('../models/IndustryTemplate');
 const openaiService = require('../services/openaiService');
 const leadCaptureService = require('../services/leadCaptureService');
+const { CHAT_MODEL, SYSTEM_PROMPT } = require('../openaiModels');
 
 // In-memory conversation store (in production, use Redis)
 const conversations = new Map();
+
+/**
+ * Voice Configuration
+ * Maps OpenAI voice types to Amazon Polly voices (used by Twilio <Say>)
+ * Note: Twilio uses Polly for TTS, not OpenAI TTS (for lower latency in real-time calls)
+ */
+const VOICE_MAP = {
+  alloy: 'Polly.Matthew',     // Balanced, professional -> Matthew
+  echo: 'Polly.Joey',          // Clear, articulate -> Joey
+  fable: 'Polly.Joanna',       // Warm, friendly -> Joanna
+  onyx: 'Polly.Brian',         // Deep, authoritative -> Brian (UK)
+  nova: 'Polly.Salli',         // Energetic, upbeat -> Salli
+  shimmer: 'Polly.Kimberly',   // Smooth, calming -> Kimberly
+};
+
+const DEFAULT_VOICE = 'Polly.Joanna';
+
+/**
+ * Get Polly voice for business
+ */
+function getVoiceForBusiness(business) {
+  const voiceType = business?.voiceType || 'nova';
+  return VOICE_MAP[voiceType] || DEFAULT_VOICE;
+}
 
 /**
  * Main voice webhook - handles incoming calls
@@ -95,14 +120,18 @@ router.post('/voice', async (req, res) => {
     // Initialize conversation
     const greeting = openaiService.generateGreeting(business, isAfterHours);
     const systemPrompt = openaiService.generateSystemPrompt(business, template);
+    const voice = getVoiceForBusiness(business);
 
     conversations.set(CallSid, {
       businessId: business._id.toString(),
       callId: call._id.toString(),
       systemPrompt,
       history: [],
-      isAfterHours
+      isAfterHours,
+      voice // Store voice for use in gather webhook
     });
+
+    console.log(`Using voice: ${voice} for business: ${business.businessName}`);
 
     // Add greeting to transcript
     await call.addTranscriptEntry('assistant', greeting);
@@ -118,7 +147,7 @@ router.post('/voice', async (req, res) => {
     });
     
     gather.say({
-      voice: 'Polly.Joanna'
+      voice
     }, greeting);
 
     // If no input, prompt again
@@ -174,22 +203,27 @@ router.post('/gather', async (req, res) => {
       return await handleCallEnd(call, conversation, twiml, res);
     }
 
+    // Get the stored voice for this conversation
+    const voice = conversation.voice || DEFAULT_VOICE;
+
     // Check conversation turn limit
     if (conversation.history.length >= 20) {
       twiml.say({
-        voice: 'Polly.Joanna'
+        voice
       }, 'Thank you for your call. Someone will follow up with you shortly. Goodbye!');
       
       await handleCallEnd(call, conversation, twiml, res, false);
       return;
     }
 
-    // Generate AI response
-    const { response, tokensUsed, responseTime } = await openaiService.processConversation(
+    // Generate AI response using CHAT_MODEL (gpt-4o-mini)
+    const { response, tokensUsed, responseTime, model } = await openaiService.processConversation(
       conversation.history,
       conversation.systemPrompt,
       { maxTokens: 150 }
     );
+
+    console.log(`AI response generated using ${model} in ${responseTime}ms`);
 
     // Update stats
     call.aiStats.tokensUsed += tokensUsed;
@@ -210,7 +244,7 @@ router.post('/gather', async (req, res) => {
     });
     
     gather.say({
-      voice: 'Polly.Joanna'
+      voice
     }, response);
 
     // If no input, check if we should end or prompt again
@@ -229,7 +263,8 @@ router.post('/gather', async (req, res) => {
       language: 'en-US'
     });
     
-    gather.say({ voice: 'Polly.Joanna' }, 'I\'m here to help. What can I do for you?');
+    const voice = conversation?.voice || DEFAULT_VOICE;
+    gather.say({ voice }, 'I\'m here to help. What can I do for you?');
     
     res.type('text/xml').send(twiml.toString());
   }
@@ -253,10 +288,12 @@ router.post('/voice/no-input', async (req, res) => {
   // Track no-input count
   conversation.noInputCount = (conversation.noInputCount || 0) + 1;
 
+  const voice = conversation.voice || DEFAULT_VOICE;
+
   if (conversation.noInputCount >= 3) {
     const call = await Call.findById(conversation.callId);
     twiml.say({
-      voice: 'Polly.Joanna'
+      voice
     }, 'I haven\'t heard from you. Thank you for calling. Goodbye!');
     
     if (call) {
@@ -277,7 +314,7 @@ router.post('/voice/no-input', async (req, res) => {
   });
   
   gather.say({
-    voice: 'Polly.Joanna'
+    voice
   }, 'Are you still there? How can I help you?');
 
   twiml.redirect('/webhooks/twilio/voice/no-input?CallSid=' + CallSid);
@@ -406,8 +443,9 @@ async function handleCallEnd(call, conversation, twiml, res, sayGoodbye = true) 
     }
 
     if (sayGoodbye) {
+      const voice = conversation.voice || DEFAULT_VOICE;
       twiml.say({
-        voice: 'Polly.Joanna'
+        voice
       }, 'Thank you for calling. Have a great day! Goodbye.');
     }
     

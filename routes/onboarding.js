@@ -76,7 +76,7 @@ router.post('/search-numbers', async (req, res) => {
 
 /**
  * POST /api/onboarding/create
- * Create a new business and provision phone number
+ * Create a new business (phone provisioning is optional for MVP)
  */
 router.post('/create', async (req, res) => {
   const session = await mongoose.startSession();
@@ -89,21 +89,23 @@ router.post('/create', async (req, res) => {
       ownerEmail,
       ownerPhone,
       industry,
-      selectedPhoneNumber,
+      selectedPhoneNumber, // Optional for MVP
       customGreeting,
       customInstructions,
       voiceType,
       businessHours,
       timezone,
       services,
-      faqs
+      faqs,
+      callSettings,
+      notificationSettings
     } = req.body;
 
-    // Validate required fields
-    if (!businessName || !ownerName || !ownerEmail || !industry || !selectedPhoneNumber) {
+    // Validate required fields (phone number is now optional)
+    if (!businessName || !ownerEmail || !industry) {
       return res.status(400).json({
         success: false,
-        error: 'Missing required fields: businessName, ownerName, ownerEmail, industry, selectedPhoneNumber'
+        error: 'Missing required fields: businessName, ownerEmail, industry'
       });
     }
 
@@ -119,68 +121,74 @@ router.post('/create', async (req, res) => {
     // Get industry template
     const template = await IndustryTemplate.getBySlug(industry);
 
-    // Provision the phone number
-    let provisionedNumber;
-    try {
-      provisionedNumber = await numberProvisioningService.provisionNumber(
-        selectedPhoneNumber,
-        'pending' // Will update with actual business ID
-      );
-    } catch (provisionError) {
-      console.error('Failed to provision number:', provisionError);
-      return res.status(400).json({
-        success: false,
-        error: 'Failed to provision phone number. It may no longer be available.'
-      });
+    // Provision phone number only if one was selected
+    let provisionedNumber = null;
+    if (selectedPhoneNumber) {
+      try {
+        provisionedNumber = await numberProvisioningService.provisionNumber(
+          selectedPhoneNumber,
+          'pending'
+        );
+      } catch (provisionError) {
+        console.error('Failed to provision number:', provisionError);
+        // Continue without phone number for MVP
+      }
     }
 
     // Create the business
     const business = new Business({
       businessName,
-      ownerName,
+      ownerName: ownerName || businessName,
       ownerEmail: ownerEmail.toLowerCase(),
-      ownerPhone,
+      ownerPhone: ownerPhone || '',
       industry,
       industryTemplate: template?._id,
-      twilioPhoneNumber: provisionedNumber.phoneNumber,
-      twilioPhoneSid: provisionedNumber.phoneSid,
+      twilioPhoneNumber: provisionedNumber?.phoneNumber || '',
+      twilioPhoneSid: provisionedNumber?.phoneSid || '',
       customGreeting: customGreeting || '',
       customInstructions: customInstructions || '',
-      voiceType: voiceType || template?.recommendedVoice || 'alloy',
+      voiceType: voiceType || template?.recommendedVoice || 'nova',
       businessHours: businessHours || template?.defaultBusinessHours || getDefaultBusinessHours(),
       timezone: timezone || 'America/New_York',
       services: services || template?.suggestedServices || [],
       faqs: faqs || template?.suggestedFaqs || [],
-      onboardingCompleted: true
+      callSettings: callSettings || {},
+      onboardingCompleted: true,
+      isActive: true
     });
 
     await business.save({ session });
 
-    // Update the phone number friendly name with actual business ID
-    try {
-      await numberProvisioningService.updateWebhooks(provisionedNumber.phoneSid, {
-        voiceUrl: `${process.env.BASE_URL}/webhooks/twilio/voice`,
-        statusCallback: `${process.env.BASE_URL}/webhooks/twilio/status`
-      });
-    } catch (updateError) {
-      console.error('Failed to update webhook URLs:', updateError);
-      // Non-critical, continue
+    // Update webhooks if phone was provisioned
+    if (provisionedNumber?.phoneSid) {
+      try {
+        await numberProvisioningService.updateWebhooks(provisionedNumber.phoneSid, {
+          voiceUrl: `${process.env.BASE_URL}/webhooks/twilio/voice`,
+          statusCallback: `${process.env.BASE_URL}/webhooks/twilio/status`
+        });
+      } catch (updateError) {
+        console.error('Failed to update webhook URLs:', updateError);
+      }
     }
 
     // Create notification recipient for owner
     const notificationRecipient = new NotificationRecipient({
       business: business._id,
-      name: ownerName,
+      name: ownerName || businessName,
       email: ownerEmail.toLowerCase(),
-      phone: ownerPhone,
+      phone: ownerPhone || '',
       role: 'owner',
       notifications: {
         email: {
-          enabled: true,
+          enabled: notificationSettings?.emailNotifications !== false,
           newLead: true,
           missedCall: true,
           dailySummary: false,
           weeklySummary: true
+        },
+        sms: {
+          enabled: notificationSettings?.smsNotifications === true,
+          phone: notificationSettings?.smsNumber || ''
         }
       }
     });
@@ -189,22 +197,26 @@ router.post('/create', async (req, res) => {
 
     await session.commitTransaction();
 
+    console.log('Business created successfully:', business._id);
+
     res.status(201).json({
       success: true,
       business: {
         id: business._id,
+        _id: business._id, // Include both for compatibility
         businessName: business.businessName,
         phoneNumber: business.twilioPhoneNumber,
         formattedPhone: business.formattedPhone,
         industry: business.industry,
         onboardingCompleted: business.onboardingCompleted
       },
+      businessId: business._id, // Also include at top level
       message: 'Business created successfully! Your AI receptionist is ready.'
     });
   } catch (error) {
     await session.abortTransaction();
     console.error('Error creating business:', error);
-    res.status(500).json({ success: false, error: 'Failed to create business' });
+    res.status(500).json({ success: false, error: 'Failed to create business: ' + error.message });
   } finally {
     session.endSession();
   }

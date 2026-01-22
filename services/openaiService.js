@@ -1,4 +1,5 @@
 const OpenAI = require('openai');
+const { STT_MODEL, CHAT_MODEL, TTS_MODEL, TTS_VOICES, SYSTEM_PROMPT } = require('../openaiModels');
 
 class OpenAIService {
   constructor() {
@@ -100,7 +101,7 @@ Remember: You are the first impression of {businessName}. Make it count!`;
     this.initialize();
 
     const {
-      model = 'gpt-4o-mini',
+      model = CHAT_MODEL,
       maxTokens = 150,
       temperature = 0.7
     } = options;
@@ -174,7 +175,7 @@ Only return valid JSON, nothing else.`;
 
     try {
       const completion = await this.client.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: CHAT_MODEL,
         messages: [
           { role: 'system', content: extractionPrompt },
           { role: 'user', content: conversationText }
@@ -211,7 +212,7 @@ Only return valid JSON, nothing else.`;
 
     try {
       const completion = await this.client.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: CHAT_MODEL,
         messages: [
           {
             role: 'system',
@@ -239,7 +240,7 @@ Only return valid JSON, nothing else.`;
 
     try {
       const completion = await this.client.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: CHAT_MODEL,
         messages: [
           {
             role: 'system',
@@ -270,7 +271,7 @@ Only return valid JSON, nothing else.`;
 
     try {
       const completion = await this.client.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: CHAT_MODEL,
         messages: [
           {
             role: 'system',
