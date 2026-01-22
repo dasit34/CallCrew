@@ -15,12 +15,20 @@ class OpenAIService {
 
     const apiKey = process.env.OPENAI_API_KEY;
 
+    console.log('=== OPENAI INIT ===');
+    console.log('API Key exists:', !!apiKey);
+    console.log('API Key length:', apiKey ? apiKey.length : 0);
+    console.log('API Key prefix:', apiKey ? apiKey.substring(0, 7) + '...' : 'N/A');
+    console.log('===================');
+
     if (!apiKey) {
+      console.error('CRITICAL: OpenAI API key not configured!');
       throw new Error('OpenAI API key not configured');
     }
 
     this.client = new OpenAI({ apiKey });
     this.initialized = true;
+    console.log('OpenAI client initialized successfully');
   }
 
   /**
@@ -98,7 +106,16 @@ Remember: You are the first impression of {businessName}. Make it count!`;
    * @param {Object} options - Additional options
    */
   async processConversation(conversationHistory, systemPrompt, options = {}) {
-    this.initialize();
+    console.log('=== OPENAI processConversation START ===');
+    
+    try {
+      this.initialize();
+    } catch (initError) {
+      console.error('=== OPENAI INIT FAILED ===');
+      console.error('Error:', initError.message);
+      console.error('==========================');
+      throw initError;
+    }
 
     const {
       model = CHAT_MODEL,
@@ -106,14 +123,26 @@ Remember: You are the first impression of {businessName}. Make it count!`;
       temperature = 0.7
     } = options;
 
-    try {
-      const messages = [
-        { role: 'system', content: systemPrompt },
-        ...conversationHistory
-      ];
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      ...conversationHistory
+    ];
 
-      const startTime = Date.now();
-      
+    console.log('=== OPENAI REQUEST ===');
+    console.log('Model:', model);
+    console.log('Max Tokens:', maxTokens);
+    console.log('Temperature:', temperature);
+    console.log('System Prompt (first 200 chars):', systemPrompt.substring(0, 200) + '...');
+    console.log('Conversation History Length:', conversationHistory.length);
+    console.log('Messages:', JSON.stringify(messages.map(m => ({
+      role: m.role,
+      content: m.content.substring(0, 100) + (m.content.length > 100 ? '...' : '')
+    })), null, 2));
+    console.log('======================');
+
+    const startTime = Date.now();
+    
+    try {
       const completion = await this.client.chat.completions.create({
         model,
         messages,
@@ -124,6 +153,14 @@ Remember: You are the first impression of {businessName}. Make it count!`;
       });
 
       const responseTime = Date.now() - startTime;
+
+      console.log('=== OPENAI RESPONSE ===');
+      console.log('Response Time:', responseTime + 'ms');
+      console.log('Choices Count:', completion.choices?.length || 0);
+      console.log('Finish Reason:', completion.choices?.[0]?.finish_reason);
+      console.log('Response Text:', completion.choices?.[0]?.message?.content);
+      console.log('Usage:', JSON.stringify(completion.usage));
+      console.log('=======================');
 
       const response = completion.choices[0].message.content;
       const usage = completion.usage;
@@ -137,7 +174,13 @@ Remember: You are the first impression of {businessName}. Make it count!`;
         model
       };
     } catch (error) {
-      console.error('OpenAI API error:', error);
+      console.error('=== OPENAI API ERROR ===');
+      console.error('Error Type:', error.constructor.name);
+      console.error('Error Message:', error.message);
+      console.error('Error Status:', error.status);
+      console.error('Error Code:', error.code);
+      console.error('Full Error:', JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
+      console.error('========================');
       throw new Error(`Failed to process conversation: ${error.message}`);
     }
   }

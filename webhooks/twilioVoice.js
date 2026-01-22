@@ -97,6 +97,15 @@ router.post('/voice', async (req, res) => {
     const greeting = openaiService.generateGreeting(business, isAfterHours);
     const systemPrompt = openaiService.generateSystemPrompt(business, template);
 
+    console.log('=== CONVERSATION INITIALIZED ===');
+    console.log('Business:', business.businessName);
+    console.log('Industry:', business.industry);
+    console.log('Template found:', !!template);
+    console.log('Greeting:', greeting);
+    console.log('System Prompt (first 500 chars):', systemPrompt?.substring(0, 500) || 'NO PROMPT');
+    console.log('Is After Hours:', isAfterHours);
+    console.log('================================');
+
     conversations.set(CallSid, {
       businessId: business._id.toString(),
       callId: call._id.toString(),
@@ -108,8 +117,6 @@ router.post('/voice', async (req, res) => {
 
     // Add greeting to transcript
     await call.addTranscriptEntry('assistant', greeting);
-
-    console.log('Greeting:', greeting);
 
     // Respond with greeting using <Say>, then gather speech input
     const gather = twiml.gather({
@@ -253,18 +260,33 @@ router.post('/gather', async (req, res) => {
     }
 
     // Generate AI response using OpenAI Chat (NOT TTS)
-    console.log('Generating AI response...');
+    console.log('=== GENERATING AI RESPONSE ===');
+    console.log('History length:', conversation.history.length);
+    console.log('System prompt length:', conversation.systemPrompt?.length || 0);
+    console.log('Last user message:', speechResult);
     const startTime = Date.now();
     
     let aiResponse;
     try {
+      console.log('Calling openaiService.processConversation...');
       aiResponse = await openaiService.processConversation(
         conversation.history,
         conversation.systemPrompt,
         { maxTokens: 150 }
       );
+      console.log('=== AI RESPONSE SUCCESS ===');
+      console.log('Response received:', aiResponse?.response);
+      console.log('Tokens used:', aiResponse?.tokensUsed);
+      console.log('Response time:', Date.now() - startTime, 'ms');
+      console.log('===========================');
     } catch (aiError) {
-      console.error('OpenAI API error:', aiError);
+      console.error('=== OPENAI API ERROR IN TWILIO ===');
+      console.error('Error name:', aiError.name);
+      console.error('Error message:', aiError.message);
+      console.error('Error stack:', aiError.stack);
+      console.error('Full error:', JSON.stringify(aiError, Object.getOwnPropertyNames(aiError), 2));
+      console.error('==================================');
+      
       // Graceful fallback - don't crash
       const gather = twiml.gather({
         input: 'speech',
