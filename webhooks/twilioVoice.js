@@ -141,16 +141,21 @@ router.post('/voice', async (req, res) => {
 router.post('/gather', async (req, res) => {
   const twiml = new VoiceResponse();
   
+  // Log ALL speech input data immediately
+  console.log('=== SPEECH INPUT ===');
+  console.log('CallSid:', req.body.CallSid);
+  console.log('SpeechResult:', req.body.SpeechResult);
+  console.log('Confidence:', req.body.Confidence);
+  console.log('From:', req.body.From);
+  console.log('To:', req.body.To);
+  console.log('Full Body:', JSON.stringify(req.body, null, 2));
+  console.log('====================');
+  
   try {
     // SAFELY extract speech data - handle undefined/null/empty
     const callSid = req.body.CallSid || '';
     const speechResult = req.body.SpeechResult || '';
     const confidence = parseFloat(req.body.Confidence) || 0;
-    
-    console.log(`=== GATHER WEBHOOK ===`);
-    console.log(`CallSid: ${callSid}`);
-    console.log(`Speech: "${speechResult}" (confidence: ${confidence})`);
-    console.log(`Raw body:`, JSON.stringify(req.body));
 
     // CRITICAL: Handle missing CallSid
     if (!callSid) {
