@@ -136,46 +136,106 @@ router.post('/voice', async (req, res) => {
 /**
  * Gather webhook - processes speech input
  * Returns TwiML only
+ * HARDENED: Safely handles missing/empty SpeechResult
  */
 router.post('/gather', async (req, res) => {
   const twiml = new VoiceResponse();
   
   try {
-    const { CallSid, SpeechResult, Confidence } = req.body;
+    // SAFELY extract speech data - handle undefined/null/empty
+    const callSid = req.body.CallSid || '';
+    const speechResult = req.body.SpeechResult || '';
+    const confidence = parseFloat(req.body.Confidence) || 0;
     
     console.log(`=== GATHER WEBHOOK ===`);
-    console.log(`CallSid: ${CallSid}`);
-    console.log(`Speech: "${SpeechResult}" (confidence: ${Confidence})`);
+    console.log(`CallSid: ${callSid}`);
+    console.log(`Speech: "${speechResult}" (confidence: ${confidence})`);
+    console.log(`Raw body:`, JSON.stringify(req.body));
 
-    const conversation = conversations.get(CallSid);
+    // CRITICAL: Handle missing CallSid
+    if (!callSid) {
+      console.error('No CallSid in request');
+      twiml.say({ voice: VOICE }, 'Sorry, there was a connection error. Goodbye.');
+      twiml.hangup();
+      return sendTwiML(res, twiml);
+    }
+
+    const conversation = conversations.get(callSid);
     
     if (!conversation) {
-      console.error(`No conversation found for CallSid: ${CallSid}`);
+      console.error(`No conversation found for CallSid: ${callSid}`);
       twiml.say({ voice: VOICE }, 'Sorry, there was an error with your call. Goodbye.');
       twiml.hangup();
       return sendTwiML(res, twiml);
     }
 
-    // Reset no-input count since we got speech
+    // CRITICAL: Handle empty/missing speech input
+    if (!speechResult || speechResult.trim() === '') {
+      console.log(`Empty speech input for CallSid: ${callSid}`);
+      conversation.noInputCount = (conversation.noInputCount || 0) + 1;
+      
+      // After 3 empty inputs, end call
+      if (conversation.noInputCount >= 3) {
+        const call = await Call.findById(conversation.callId);
+        twiml.say({ voice: VOICE }, 'I\'m having trouble hearing you. Thank you for calling. Goodbye!');
+        if (call) {
+          return await handleCallEnd(call, conversation, twiml, res, false);
+        }
+        twiml.hangup();
+        return sendTwiML(res, twiml);
+      }
+      
+      // Prompt to repeat
+      const gather = twiml.gather({
+        input: 'speech',
+        action: '/webhooks/twilio/gather',
+        method: 'POST',
+        speechTimeout: '5',
+        language: 'en-US'
+      });
+      gather.say({ voice: VOICE }, 'I didn\'t catch that. Could you please repeat?');
+      
+      twiml.redirect({ method: 'POST' }, '/webhooks/twilio/no-input?CallSid=' + callSid);
+      return sendTwiML(res, twiml);
+    }
+
+    // CRITICAL: Handle very low confidence (likely noise/garbage)
+    if (confidence > 0 && confidence < 0.3) {
+      console.log(`Low confidence (${confidence}) for speech: "${speechResult}"`);
+      const gather = twiml.gather({
+        input: 'speech',
+        action: '/webhooks/twilio/gather',
+        method: 'POST',
+        speechTimeout: '5',
+        language: 'en-US'
+      });
+      gather.say({ voice: VOICE }, 'Sorry, I had trouble understanding. Could you say that again?');
+      
+      twiml.redirect({ method: 'POST' }, '/webhooks/twilio/no-input?CallSid=' + callSid);
+      return sendTwiML(res, twiml);
+    }
+
+    // Reset no-input count since we got valid speech
     conversation.noInputCount = 0;
 
     // Get call document
     const call = await Call.findById(conversation.callId);
     
     if (!call) {
+      console.error(`No call document found for callId: ${conversation.callId}`);
       twiml.say({ voice: VOICE }, 'Sorry, there was an error. Goodbye.');
       twiml.hangup();
       return sendTwiML(res, twiml);
     }
 
     // Add user message to transcript
-    await call.addTranscriptEntry('user', SpeechResult);
+    await call.addTranscriptEntry('user', speechResult);
     
     // Add to conversation history
-    conversation.history.push({ role: 'user', content: SpeechResult });
+    conversation.history.push({ role: 'user', content: speechResult });
 
     // Check for end-of-call keywords
-    const lowerSpeech = SpeechResult.toLowerCase();
+    const lowerSpeech = speechResult.toLowerCase();
     if (lowerSpeech.includes('goodbye') || lowerSpeech.includes('bye') || 
         lowerSpeech.includes('that\'s all') || lowerSpeech.includes('nothing else')) {
       return await handleCallEnd(call, conversation, twiml, res, true);
@@ -191,11 +251,29 @@ router.post('/gather', async (req, res) => {
     console.log('Generating AI response...');
     const startTime = Date.now();
     
-    const { response, tokensUsed, model } = await openaiService.processConversation(
-      conversation.history,
-      conversation.systemPrompt,
-      { maxTokens: 150 }
-    );
+    let aiResponse;
+    try {
+      aiResponse = await openaiService.processConversation(
+        conversation.history,
+        conversation.systemPrompt,
+        { maxTokens: 150 }
+      );
+    } catch (aiError) {
+      console.error('OpenAI API error:', aiError);
+      // Graceful fallback - don't crash
+      const gather = twiml.gather({
+        input: 'speech',
+        action: '/webhooks/twilio/gather',
+        method: 'POST',
+        speechTimeout: '5',
+        language: 'en-US'
+      });
+      gather.say({ voice: VOICE }, 'I\'m sorry, I\'m having a moment. Could you repeat that?');
+      twiml.redirect({ method: 'POST' }, '/webhooks/twilio/no-input?CallSid=' + callSid);
+      return sendTwiML(res, twiml);
+    }
+
+    const { response, tokensUsed, model } = aiResponse;
 
     console.log(`AI response (${Date.now() - startTime}ms, ${model}): "${response}"`);
 
@@ -219,23 +297,31 @@ router.post('/gather', async (req, res) => {
     gather.say({ voice: VOICE }, response);
 
     // If no input, redirect to no-input handler
-    twiml.redirect({ method: 'POST' }, '/webhooks/twilio/no-input?CallSid=' + CallSid);
+    twiml.redirect({ method: 'POST' }, '/webhooks/twilio/no-input?CallSid=' + callSid);
 
     return sendTwiML(res, twiml);
   } catch (error) {
     console.error('Error in gather webhook:', error);
+    console.error('Error stack:', error.stack);
     
-    // Error recovery - ask to repeat
+    // CRITICAL: Safe error recovery - never crash, always return valid TwiML
+    const errorCallSid = req.body?.CallSid || '';
+    
     const gather = twiml.gather({
       input: 'speech',
       action: '/webhooks/twilio/gather',
       method: 'POST',
-      speechTimeout: 'auto',
+      speechTimeout: '5',
       language: 'en-US'
     });
     gather.say({ voice: VOICE }, 'Sorry, I had trouble with that. Could you please repeat?');
     
-    twiml.redirect({ method: 'POST' }, '/webhooks/twilio/no-input?CallSid=' + req.body.CallSid);
+    if (errorCallSid) {
+      twiml.redirect({ method: 'POST' }, '/webhooks/twilio/no-input?CallSid=' + errorCallSid);
+    } else {
+      twiml.say({ voice: VOICE }, 'I\'m sorry, there was a technical issue. Goodbye.');
+      twiml.hangup();
+    }
     
     return sendTwiML(res, twiml);
   }
