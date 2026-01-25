@@ -9,23 +9,40 @@ class LeadCaptureService {
    * @param {Object} options.call - The call document
    * @param {Object} options.business - The business document
    * @param {Array} options.transcript - The conversation transcript
+   * @param {Object} options.collectedInfo - Pre-collected info (name, phone, reason) from scripted flow
    */
   async captureFromCall(options) {
-    const { call, business, transcript } = options;
+    const { call, business, transcript, collectedInfo } = options;
 
     try {
-      // Extract lead information using AI
-      const extractedInfo = await openaiService.extractLeadInfo(transcript);
+      let extractedInfo = {};
       
-      if (!extractedInfo) {
+      // Use pre-collected info if available (avoids OpenAI call)
+      if (collectedInfo && (collectedInfo.name || collectedInfo.phone || collectedInfo.reason)) {
+        console.log('Using pre-collected info (no OpenAI needed)');
+        extractedInfo = {
+          name: collectedInfo.name || 'Unknown',
+          phone: collectedInfo.phone,
+          summary: collectedInfo.reason || 'General inquiry',
+          interestedIn: collectedInfo.reason,
+          quality: collectedInfo.phone ? 'warm' : 'cold'
+        };
+      } else if (transcript && transcript.length > 0) {
+        // Fall back to AI extraction only if no collected info
+        console.log('Extracting lead info with OpenAI...');
+        extractedInfo = await openaiService.extractLeadInfo(transcript) || {};
+      }
+      
+      if (!extractedInfo.name && !call.fromNumber) {
         console.log('Could not extract lead info from conversation');
         return null;
       }
 
       // Check if lead already exists with this phone number
+      const phoneToCheck = extractedInfo.phone || call.fromNumber;
       const existingLead = await Lead.findOne({
         business: business._id,
-        phone: { $regex: call.fromNumber.replace(/\D/g, '').slice(-10) }
+        phone: { $regex: phoneToCheck.replace(/\D/g, '').slice(-10) }
       });
 
       if (existingLead) {
@@ -38,7 +55,7 @@ class LeadCaptureService {
         business,
         call,
         extractedInfo,
-        phone: call.fromNumber
+        phone: extractedInfo.phone || call.fromNumber
       });
 
       // Send notification
