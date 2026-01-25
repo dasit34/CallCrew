@@ -8,9 +8,10 @@ class NumberProvisioningService {
 
   /**
    * Initialize the Twilio client
+   * @returns {Object} The Twilio client for direct access
    */
   initialize() {
-    if (this.initialized) return;
+    if (this.initialized) return this.client;
     
     const accountSid = process.env.TWILIO_ACCOUNT_SID;
     const authToken = process.env.TWILIO_AUTH_TOKEN;
@@ -21,6 +22,15 @@ class NumberProvisioningService {
 
     this.client = twilio(accountSid, authToken);
     this.initialized = true;
+    return this.client;
+  }
+
+  /**
+   * Get the Twilio client (initializing if needed)
+   */
+  getClient() {
+    this.initialize();
+    return this.client;
   }
 
   /**

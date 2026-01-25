@@ -76,7 +76,7 @@ router.post('/search-numbers', async (req, res) => {
 
 /**
  * POST /api/onboarding/create
- * Create a new business (phone provisioning is optional for MVP)
+ * Create a new business with automatic phone provisioning
  */
 router.post('/create', async (req, res) => {
   const session = await mongoose.startSession();
@@ -89,7 +89,7 @@ router.post('/create', async (req, res) => {
       ownerEmail,
       ownerPhone,
       industry,
-      selectedPhoneNumber, // Optional for MVP
+      selectedPhoneNumber, // Optional - will auto-provision if not provided
       customGreeting,
       customInstructions,
       voiceType,
@@ -101,7 +101,7 @@ router.post('/create', async (req, res) => {
       notificationSettings
     } = req.body;
 
-    // Validate required fields (phone number is now optional)
+    // Validate required fields
     if (!businessName || !ownerEmail || !industry) {
       return res.status(400).json({
         success: false,
@@ -121,18 +121,56 @@ router.post('/create', async (req, res) => {
     // Get industry template
     const template = await IndustryTemplate.getBySlug(industry);
 
-    // Provision phone number only if one was selected
+    // AUTOMATIC PHONE PROVISIONING
+    // If no phone number was selected, search for and provision one automatically
     let provisionedNumber = null;
-    if (selectedPhoneNumber) {
+    let phoneToProvision = selectedPhoneNumber;
+
+    if (!phoneToProvision) {
+      console.log('No phone selected, searching for available number...');
+      try {
+        // Search for available numbers (try local first, then toll-free)
+        const availableNumbers = await numberProvisioningService.searchAvailableNumbers({
+          country: 'US',
+          voiceEnabled: true,
+          limit: 1
+        });
+
+        if (availableNumbers && availableNumbers.length > 0) {
+          phoneToProvision = availableNumbers[0].phoneNumber;
+          console.log('Found available number:', phoneToProvision);
+        } else {
+          console.log('No local numbers available, trying toll-free...');
+          // Try toll-free as fallback
+          const twilioClient = numberProvisioningService.getClient();
+          const tollFreeNumbers = await twilioClient
+            .availablePhoneNumbers('US')
+            .tollFree.list({ voiceEnabled: true, limit: 1 });
+          
+          if (tollFreeNumbers && tollFreeNumbers.length > 0) {
+            phoneToProvision = tollFreeNumbers[0].phoneNumber;
+            console.log('Found toll-free number:', phoneToProvision);
+          }
+        }
+      } catch (searchError) {
+        console.error('Failed to search for numbers:', searchError);
+      }
+    }
+
+    // Provision the phone number if we have one
+    if (phoneToProvision) {
       try {
         provisionedNumber = await numberProvisioningService.provisionNumber(
-          selectedPhoneNumber,
+          phoneToProvision,
           'pending'
         );
+        console.log('Successfully provisioned number:', provisionedNumber.phoneNumber);
       } catch (provisionError) {
         console.error('Failed to provision number:', provisionError);
-        // Continue without phone number for MVP
+        // Continue without phone number - they can add one later
       }
+    } else {
+      console.warn('No phone number available to provision');
     }
 
     // Create the business
