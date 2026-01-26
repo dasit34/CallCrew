@@ -85,6 +85,18 @@ const leadSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  transcript: {
+    type: String,
+    default: ''
+  },
+  callSid: {
+    type: String,
+    index: true
+  },
+  reasonForCalling: {
+    type: String,
+    default: ''
+  },
   specificRequests: {
     type: String,
     default: ''
@@ -92,6 +104,51 @@ const leadSchema = new mongoose.Schema({
   questions: [{
     type: String
   }],
+  
+  // AI Summary
+  aiSummary: {
+    text: {
+      type: String,
+      default: null
+    },
+    status: {
+      type: String,
+      enum: ['pending', 'success', 'failed'],
+      default: 'pending'
+    },
+    model: {
+      type: String,
+      default: null
+    },
+    generatedAt: {
+      type: Date,
+      default: null
+    },
+    error: {
+      type: String,
+      default: null
+    }
+  },
+  
+  // Notification Status
+  notification: {
+    status: {
+      type: String,
+      enum: ['pending', 'sent', 'failed'],
+      default: 'pending'
+    },
+    sentAt: {
+      type: Date,
+      default: null
+    },
+    error: {
+      type: String,
+      default: null
+    },
+    recipients: [{
+      type: String
+    }]
+  },
   
   // Appointment/Callback
   callbackRequested: {
@@ -135,15 +192,6 @@ const leadSchema = new mongoose.Schema({
   tags: [{
     type: String
   }],
-  
-  // Notification Status
-  notificationSent: {
-    type: Boolean,
-    default: false
-  },
-  notificationSentAt: {
-    type: Date
-  },
   
   // Value
   estimatedValue: {

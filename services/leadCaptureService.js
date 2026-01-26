@@ -50,23 +50,23 @@ class LeadCaptureService {
         return await this.updateExistingLead(existingLead, extractedInfo, call);
       }
 
+      // Format transcript as string
+      const transcriptText = Array.isArray(transcript)
+        ? transcript.map(entry => `${entry.role === 'assistant' ? 'AI' : 'Caller'}: ${entry.content}`).join('\n')
+        : (typeof transcript === 'string' ? transcript : '');
+
       // Create new lead
       const lead = await this.createNewLead({
         business,
         call,
         extractedInfo,
-        phone: extractedInfo.phone || call.fromNumber
+        phone: extractedInfo.phone || call.fromNumber,
+        transcript: transcriptText,
+        reasonForCalling: collectedInfo?.reason || extractedInfo.interestedIn || ''
       });
 
-      // Send notification
-      try {
-        await notificationService.sendNewLeadNotification(lead, business, call);
-        lead.notificationSent = true;
-        lead.notificationSentAt = new Date();
-        await lead.save();
-      } catch (notifError) {
-        console.error('Failed to send lead notification:', notifError);
-      }
+      // Note: Email notifications are now handled in handleCallComplete()
+      // to ensure summary is generated first
 
       return lead;
     } catch (error) {
@@ -80,7 +80,7 @@ class LeadCaptureService {
    * @param {Object} options - Lead creation options
    */
   async createNewLead(options) {
-    const { business, call, extractedInfo, phone } = options;
+    const { business, call, extractedInfo, phone, transcript, reasonForCalling } = options;
 
     const leadData = {
       business: business._id,
@@ -94,8 +94,11 @@ class LeadCaptureService {
       status: 'new',
       quality: extractedInfo.quality || 'unknown',
       interestedIn: extractedInfo.interestedIn,
+      reasonForCalling: reasonForCalling || extractedInfo.interestedIn || '',
       services: extractedInfo.services || [],
       conversationSummary: extractedInfo.summary,
+      transcript: transcript || '',
+      callSid: call?.twilioCallSid || null,
       specificRequests: extractedInfo.specificRequests,
       questions: extractedInfo.questions || [],
       callbackRequested: extractedInfo.callbackRequested || false,

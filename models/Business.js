@@ -120,6 +120,28 @@ const businessSchema = new mongoose.Schema({
     }
   },
   
+  // Notification Settings
+  notificationSettings: {
+    primaryEmail: {
+      type: String,
+      lowercase: true,
+      trim: true
+    },
+    ccEmails: [{
+      type: String,
+      lowercase: true,
+      trim: true
+    }],
+    enableEmail: {
+      type: Boolean,
+      default: true
+    },
+    enableSMS: {
+      type: Boolean,
+      default: false
+    }
+  },
+  
   // Subscription Status
   subscription: {
     plan: {

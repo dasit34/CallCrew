@@ -118,6 +118,28 @@ router.post('/create', async (req, res) => {
       });
     }
 
+    // Validate notificationSettings.primaryEmail if provided
+    let notificationSettingsConfig = {
+      enableEmail: true,
+      enableSMS: notificationSettings?.enableSMS || false,
+      ccEmails: notificationSettings?.ccEmails || []
+    };
+
+    if (notificationSettings?.primaryEmail) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(notificationSettings.primaryEmail)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid email format in notificationSettings.primaryEmail'
+        });
+      }
+      notificationSettingsConfig.primaryEmail = notificationSettings.primaryEmail.toLowerCase();
+    } else {
+      // If no primaryEmail provided, disable email notifications
+      notificationSettingsConfig.enableEmail = false;
+      console.log('⚠️ No primaryEmail provided, disabling email notifications');
+    }
+
     // Get industry template
     const template = await IndustryTemplate.getBySlug(industry);
 
@@ -191,6 +213,7 @@ router.post('/create', async (req, res) => {
       services: services || template?.suggestedServices || [],
       faqs: faqs || template?.suggestedFaqs || [],
       callSettings: callSettings || {},
+      notificationSettings: notificationSettingsConfig,
       onboardingCompleted: true,
       isActive: true
     });

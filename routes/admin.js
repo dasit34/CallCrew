@@ -9,6 +9,8 @@ const NotificationRecipient = require('../models/NotificationRecipient');
 const leadCaptureService = require('../services/leadCaptureService');
 const notificationService = require('../services/notificationService');
 const numberProvisioningService = require('../services/numberProvisioningService');
+const summaryService = require('../services/summaryService');
+const emailService = require('../services/emailService');
 
 /**
  * GET /api/admin/businesses
@@ -541,52 +543,151 @@ REMEMBER:
 });
 
 /**
- * POST /api/admin/test-email
- * Test email configuration
+ * Middleware to check ADMIN_KEY
  */
-router.post('/test-email', async (req, res) => {
+function requireAdminKey(req, res, next) {
+  const adminKey = process.env.ADMIN_KEY;
+  const providedKey = req.query.key || req.headers['x-admin-key'];
+  
+  if (!adminKey) {
+    // If no ADMIN_KEY set, allow in development
+    if (process.env.NODE_ENV === 'development') {
+      return next();
+    }
+    return res.status(500).json({ 
+      success: false, 
+      error: 'ADMIN_KEY not configured' 
+    });
+  }
+  
+  if (providedKey !== adminKey) {
+    return res.status(401).json({ 
+      success: false, 
+      error: 'Invalid admin key' 
+    });
+  }
+  
+  next();
+}
+
+/**
+ * GET /api/admin/test-email?email=test@example.com&key=ADMIN_KEY
+ * Test email configuration with sample lead data
+ */
+router.get('/test-email', requireAdminKey, async (req, res) => {
   try {
-    const { to } = req.body;
-    const testEmail = to || process.env.EMAIL_USER;
+    const testEmail = req.query.email || process.env.EMAIL_USER;
     
     if (!testEmail) {
       return res.status(400).json({ 
         success: false, 
-        error: 'No email address provided and EMAIL_USER not set' 
+        error: 'No email address provided. Use ?email=test@example.com' 
       });
     }
 
-    console.log('=== EMAIL TEST ===');
-    console.log('EMAIL_SERVICE:', process.env.EMAIL_SERVICE);
-    console.log('EMAIL_USER:', process.env.EMAIL_USER);
-    console.log('EMAIL_PASSWORD set:', !!process.env.EMAIL_PASSWORD);
-    console.log('Sending to:', testEmail);
+    // Get first business for testing
+    const business = await Business.findOne();
+    if (!business) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'No business found. Create a business first.' 
+      });
+    }
 
-    await notificationService.sendEmail({
-      to: testEmail,
-      subject: 'CallCrew Email Test',
-      text: 'This is a test email from CallCrew. If you received this, email notifications are working!',
-      html: `
-        <div style="font-family: Arial, sans-serif; padding: 20px;">
-          <h2 style="color: #4F46E5;">CallCrew Email Test</h2>
-          <p>This is a test email from CallCrew.</p>
-          <p>If you received this, email notifications are working!</p>
-          <p style="color: #666; font-size: 12px;">Sent at: ${new Date().toISOString()}</p>
-        </div>
-      `
+    // Create sample lead
+    const sampleLead = {
+      name: 'Test Caller',
+      phone: '+15551234567',
+      email: 'test@example.com',
+      reasonForCalling: 'Testing email notifications',
+      quality: 'warm',
+      transcript: 'AI: Thank you for calling!\nCaller: Hi, I want to test the email system.\nAI: Great! I\'ll send you a test email.',
+      callSid: 'TEST123',
+      createdAt: new Date()
+    };
+
+    console.log('=== EMAIL TEST ===');
+    console.log('Sending to:', testEmail);
+    console.log('Business:', business.businessName);
+
+    const result = await emailService.sendLeadEmail({
+      business: {
+        ...business.toObject(),
+        notificationSettings: {
+          primaryEmail: testEmail,
+          enableEmail: true,
+          ccEmails: []
+        }
+      },
+      lead: sampleLead,
+      summary: 'Test caller called to verify email notifications are working. System is functioning correctly.'
     });
 
-    console.log('Email sent successfully!');
-    res.json({ success: true, message: `Test email sent to ${testEmail}` });
+    if (result.success) {
+      res.json({ 
+        success: true, 
+        message: `Test email sent to ${testEmail}`,
+        messageId: result.messageId
+      });
+    } else {
+      res.status(500).json({ 
+        success: false, 
+        error: result.error,
+        hint: result.error?.includes('EAUTH') ? 'Use Gmail App Password, not regular password.' : null
+      });
+    }
   } catch (error) {
     console.error('=== EMAIL TEST FAILED ===');
     console.error('Error:', error.message);
-    console.error('Code:', error.code);
     res.status(500).json({ 
       success: false, 
-      error: error.message,
-      code: error.code,
-      hint: error.code === 'EAUTH' ? 'Authentication failed. Use Gmail App Password, not regular password.' : null
+      error: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/admin/test-summary?key=ADMIN_KEY
+ * Test AI summary generation with sample transcript
+ */
+router.get('/test-summary', requireAdminKey, async (req, res) => {
+  try {
+    const sampleTranscript = `AI: Thank you for calling Acme Plumbing! How can I help you today?
+Caller: Hi, I have a leaky faucet in my kitchen.
+AI: I'd be happy to help! May I have your name?
+Caller: My name is John Smith.
+AI: Thanks John! What's the best phone number to reach you?
+Caller: 555-123-4567
+AI: Perfect. What's the reason for your call today?
+Caller: I need someone to fix my kitchen faucet. It's been dripping for days.
+AI: I understand. We can definitely help with that. Is this urgent or can it wait a few days?
+Caller: It's not an emergency, but I'd like it fixed this week if possible.
+AI: Great! I'll have one of our plumbers call you back today to schedule an appointment. Is there anything else?
+Caller: No, that's all. Thank you!
+AI: You're welcome! Have a great day!`;
+
+    console.log('=== SUMMARY TEST ===');
+    console.log('Transcript length:', sampleTranscript.length);
+
+    const result = await summaryService.generateSummary({
+      transcript: sampleTranscript,
+      name: 'John Smith',
+      phone: '+15551234567',
+      reason: 'Kitchen faucet leak'
+    });
+
+    res.json({
+      success: result.status === 'success',
+      summary: result,
+      sampleTranscript: sampleTranscript.substring(0, 200) + '...'
+    });
+
+  } catch (error) {
+    console.error('=== SUMMARY TEST FAILED ===');
+    console.error('Error:', error.message);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message
     });
   }
 });

@@ -5,8 +5,11 @@ const VoiceResponse = twilio.twiml.VoiceResponse;
 
 const Business = require('../models/Business');
 const Call = require('../models/Call');
+const Lead = require('../models/Lead');
 const openaiService = require('../services/openaiService');
 const leadCaptureService = require('../services/leadCaptureService');
+const summaryService = require('../services/summaryService');
+const emailService = require('../services/emailService');
 
 // In-memory conversation store (in production, use Redis)
 const conversations = new Map();
@@ -576,6 +579,106 @@ RULES:
 }
 
 /**
+ * Handle call completion: Generate summary and send email notification
+ * This is called after lead is captured and call is completed
+ */
+async function handleCallComplete(call, business) {
+  try {
+    console.log('=== HANDLING CALL COMPLETE ===');
+    console.log('Call ID:', call._id);
+    console.log('Business:', business.businessName);
+
+    // Find the lead associated with this call
+    const lead = await Lead.findOne({ call: call._id }).sort({ createdAt: -1 });
+    
+    if (!lead) {
+      console.log('⚠️ No lead found for call, skipping summary/email');
+      return;
+    }
+
+    console.log('Lead found:', lead._id);
+    console.log('Lead name:', lead.name);
+
+    // Format transcript as string
+    const transcriptText = call.transcript
+      ? call.transcript.map(entry => `${entry.role === 'assistant' ? 'AI' : 'Caller'}: ${entry.content}`).join('\n')
+      : '';
+
+    // 1. Generate AI summary (non-blocking)
+    console.log('📝 Generating AI summary...');
+    const summary = await summaryService.generateSummary({
+      transcript: transcriptText,
+      name: lead.name,
+      phone: lead.phone,
+      reason: lead.reasonForCalling || lead.interestedIn || ''
+    });
+
+    // Update lead with summary
+    lead.aiSummary = {
+      text: summary.text,
+      status: summary.status,
+      model: summary.model || 'gpt-4o-mini',
+      generatedAt: summary.status === 'success' ? new Date() : null,
+      error: summary.error
+    };
+
+    // Also update transcript and callSid if not set
+    if (!lead.transcript && transcriptText) {
+      lead.transcript = transcriptText;
+    }
+    if (!lead.callSid && call.twilioCallSid) {
+      lead.callSid = call.twilioCallSid;
+    }
+    if (!lead.reasonForCalling && (lead.interestedIn || lead.conversationSummary)) {
+      lead.reasonForCalling = lead.interestedIn || lead.conversationSummary || '';
+    }
+
+    await lead.save();
+    console.log('✅ Lead updated with summary');
+
+    // 2. Send email notification (non-blocking)
+    if (business.notificationSettings?.enableEmail && business.notificationSettings?.primaryEmail) {
+      console.log('📧 Sending email notification...');
+      const emailResult = await emailService.sendLeadEmail({
+        business,
+        lead,
+        summary: summary.text
+      });
+
+      lead.notification = {
+        status: emailResult.success ? 'sent' : 'failed',
+        sentAt: emailResult.success ? new Date() : null,
+        error: emailResult.error || null,
+        recipients: emailResult.success 
+          ? [business.notificationSettings.primaryEmail, ...(business.notificationSettings.ccEmails || [])]
+          : []
+      };
+
+      await lead.save();
+      console.log('✅ Lead updated with notification status');
+    } else {
+      console.log('⚠️ Email notifications disabled or no primaryEmail configured');
+      lead.notification = {
+        status: 'pending',
+        sentAt: null,
+        error: business.notificationSettings?.enableEmail === false 
+          ? 'Email notifications disabled' 
+          : 'No primaryEmail configured',
+        recipients: []
+      };
+      await lead.save();
+    }
+
+    console.log('✅ LEAD_PROCESSED:', lead._id);
+
+  } catch (error) {
+    console.error('❌ LEAD_PROCESSING_ERROR:', error);
+    console.error('Error stack:', error.stack);
+    // DO NOT crash - continue
+  }
+}
+
+/**
  * End call helper
  */
 async function endCall(callSid, twiml, res, message) {
@@ -593,6 +696,7 @@ async function endCall(callSid, twiml, res, message) {
       await call.addTranscriptEntry('assistant', message);
       
       // Capture lead if we have info
+      let leadCaptured = false;
       if (business && (conversation.collectedInfo.name || conversation.collectedInfo.phone)) {
         try {
           await leadCaptureService.captureFromCall({
@@ -601,12 +705,13 @@ async function endCall(callSid, twiml, res, message) {
             transcript: conversation.history,
             collectedInfo: conversation.collectedInfo
           });
+          leadCaptured = true;
         } catch (err) {
           console.error('Error capturing lead:', err);
         }
       }
 
-      // Generate summary (uses OpenAI but only at end)
+      // Generate basic summary for call record
       if (conversation.history.length > 2) {
         try {
           const summary = await openaiService.generateSummary(conversation.history);
@@ -618,6 +723,14 @@ async function endCall(callSid, twiml, res, message) {
       }
 
       await call.completeCall(call.conversationSummary);
+
+      // Process summary and email notification (non-blocking)
+      if (leadCaptured && business) {
+        // Run in background - don't await to avoid blocking call end
+        handleCallComplete(call, business).catch(err => {
+          console.error('Background lead processing error:', err);
+        });
+      }
     }
     
     conversations.delete(callSid);
@@ -702,11 +815,14 @@ router.post('/status', async (req, res) => {
         }
 
         const conversation = conversations.get(CallSid);
+        let leadCaptured = call.leadCaptured;
+        let business = null;
+
         if (conversation) {
           // Capture lead if not already done
           if (!call.leadCaptured && conversation.collectedInfo.name) {
             try {
-              const business = await Business.findById(conversation.businessId);
+              business = await Business.findById(conversation.businessId);
               if (business) {
                 await leadCaptureService.captureFromCall({
                   call,
@@ -714,10 +830,14 @@ router.post('/status', async (req, res) => {
                   transcript: conversation.history,
                   collectedInfo: conversation.collectedInfo
                 });
+                leadCaptured = true;
               }
             } catch (err) {
               console.error('Error capturing lead:', err);
             }
+          } else if (call.leadCaptured) {
+            // Lead already captured, get business
+            business = await Business.findById(conversation.businessId);
           }
 
           // Generate summary if not done
@@ -733,6 +853,14 @@ router.post('/status', async (req, res) => {
         }
 
         await call.completeCall(call.conversationSummary);
+
+        // Process summary and email notification (non-blocking)
+        if (leadCaptured && business) {
+          // Run in background - don't await to avoid blocking status webhook
+          handleCallComplete(call, business).catch(err => {
+            console.error('Background lead processing error:', err);
+          });
+        }
       } else {
         await call.save();
       }
