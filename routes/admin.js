@@ -540,4 +540,92 @@ REMEMBER:
   }
 });
 
+/**
+ * POST /api/admin/test-email
+ * Test email configuration
+ */
+router.post('/test-email', async (req, res) => {
+  try {
+    const { to } = req.body;
+    const testEmail = to || process.env.EMAIL_USER;
+    
+    if (!testEmail) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'No email address provided and EMAIL_USER not set' 
+      });
+    }
+
+    console.log('=== EMAIL TEST ===');
+    console.log('EMAIL_SERVICE:', process.env.EMAIL_SERVICE);
+    console.log('EMAIL_USER:', process.env.EMAIL_USER);
+    console.log('EMAIL_PASSWORD set:', !!process.env.EMAIL_PASSWORD);
+    console.log('Sending to:', testEmail);
+
+    await notificationService.sendEmail({
+      to: testEmail,
+      subject: 'CallCrew Email Test',
+      text: 'This is a test email from CallCrew. If you received this, email notifications are working!',
+      html: `
+        <div style="font-family: Arial, sans-serif; padding: 20px;">
+          <h2 style="color: #4F46E5;">CallCrew Email Test</h2>
+          <p>This is a test email from CallCrew.</p>
+          <p>If you received this, email notifications are working!</p>
+          <p style="color: #666; font-size: 12px;">Sent at: ${new Date().toISOString()}</p>
+        </div>
+      `
+    });
+
+    console.log('Email sent successfully!');
+    res.json({ success: true, message: `Test email sent to ${testEmail}` });
+  } catch (error) {
+    console.error('=== EMAIL TEST FAILED ===');
+    console.error('Error:', error.message);
+    console.error('Code:', error.code);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message,
+      code: error.code,
+      hint: error.code === 'EAUTH' ? 'Authentication failed. Use Gmail App Password, not regular password.' : null
+    });
+  }
+});
+
+/**
+ * GET /api/admin/system-status
+ * Check system configuration status
+ */
+router.get('/system-status', async (req, res) => {
+  const status = {
+    mongodb: false,
+    twilio: false,
+    openai: false,
+    email: false
+  };
+
+  // Check MongoDB
+  try {
+    await Business.findOne();
+    status.mongodb = true;
+  } catch (e) {
+    status.mongodbError = e.message;
+  }
+
+  // Check Twilio
+  status.twilio = !!(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN);
+  
+  // Check OpenAI
+  status.openai = !!process.env.OPENAI_API_KEY;
+  
+  // Check Email
+  status.email = !!(process.env.EMAIL_USER && process.env.EMAIL_PASSWORD);
+
+  res.json({
+    success: true,
+    status,
+    environment: process.env.NODE_ENV,
+    baseUrl: process.env.BASE_URL || process.env.WEBHOOK_BASE_URL || 'NOT SET'
+  });
+});
+
 module.exports = router;
