@@ -181,8 +181,8 @@ router.post('/create', async (req, res) => {
       ownerPhone: ownerPhone || '',
       industry,
       industryTemplate: template?._id,
-      twilioPhoneNumber: provisionedNumber?.phoneNumber || '',
-      twilioPhoneSid: provisionedNumber?.phoneSid || '',
+      twilioPhoneNumber: provisionedNumber?.phoneNumber || null,  // Use null, not '' for sparse index
+      twilioPhoneSid: provisionedNumber?.phoneSid || null,
       customGreeting: customGreeting || '',
       customInstructions: customInstructions || '',
       voiceType: voiceType || template?.recommendedVoice || 'nova',

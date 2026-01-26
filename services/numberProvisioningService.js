@@ -43,7 +43,11 @@ class NumberProvisioningService {
    * @param {number} options.limit - Number of results
    */
   async searchAvailableNumbers(options = {}) {
+    console.log('=== NUMBER SEARCH START ===');
+    console.log('Options received:', JSON.stringify(options));
+    
     this.initialize();
+    console.log('Twilio client initialized, Account SID:', process.env.TWILIO_ACCOUNT_SID?.substring(0, 10) + '...');
 
     const {
       areaCode,
@@ -64,9 +68,18 @@ class NumberProvisioningService {
         searchParams.areaCode = areaCode;
       }
 
+      console.log('Search params:', JSON.stringify(searchParams));
+      console.log('Country:', country);
+
       const availableNumbers = await this.client
         .availablePhoneNumbers(country)
         .local.list(searchParams);
+
+      console.log('Numbers found:', availableNumbers.length);
+      if (availableNumbers.length > 0) {
+        console.log('First number:', availableNumbers[0].phoneNumber);
+      }
+      console.log('=== NUMBER SEARCH END ===');
 
       return availableNumbers.map(num => ({
         phoneNumber: num.phoneNumber,
@@ -81,7 +94,13 @@ class NumberProvisioningService {
         }
       }));
     } catch (error) {
-      console.error('Error searching for available numbers:', error);
+      console.error('=== NUMBER SEARCH ERROR ===');
+      console.error('Error name:', error.name);
+      console.error('Error message:', error.message);
+      console.error('Error code:', error.code);
+      console.error('Error status:', error.status);
+      console.error('Full error:', JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
+      console.error('=== NUMBER SEARCH ERROR END ===');
       throw new Error(`Failed to search for numbers: ${error.message}`);
     }
   }
