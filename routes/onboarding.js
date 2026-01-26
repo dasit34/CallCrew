@@ -127,17 +127,21 @@ router.post('/create', async (req, res) => {
 
     if (notificationSettings?.primaryEmail) {
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(notificationSettings.primaryEmail)) {
-        return res.status(400).json({
-          success: false,
-          error: 'Invalid email format in notificationSettings.primaryEmail'
-        });
+      const emailToTest = notificationSettings.primaryEmail.trim().toLowerCase();
+      
+      if (!emailRegex.test(emailToTest)) {
+        // Invalid email - disable email notifications but don't fail onboarding
+        console.warn('⚠️ Invalid primaryEmail format, disabling email notifications');
+        notificationSettingsConfig.enableEmail = false;
+        notificationSettingsConfig.primaryEmail = null;
+      } else {
+        notificationSettingsConfig.primaryEmail = emailToTest;
       }
-      notificationSettingsConfig.primaryEmail = notificationSettings.primaryEmail.toLowerCase();
     } else {
-      // If no primaryEmail provided, disable email notifications
+      // If no primaryEmail provided, disable email notifications (summary still generated)
       notificationSettingsConfig.enableEmail = false;
-      console.log('⚠️ No primaryEmail provided, disabling email notifications');
+      notificationSettingsConfig.primaryEmail = null;
+      console.log('⚠️ No primaryEmail provided, disabling email notifications (summary will still be generated)');
     }
 
     // Get industry template

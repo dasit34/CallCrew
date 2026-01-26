@@ -216,4 +216,18 @@ businessSchema.methods.isCurrentlyOpen = function() {
   return currentTime >= todayHours.open && currentTime <= todayHours.close;
 };
 
+// Ensure notificationSettings exists (backward compatibility)
+businessSchema.methods.getNotificationSettings = function() {
+  if (!this.notificationSettings) {
+    // Return defaults for backward compatibility
+    return {
+      primaryEmail: this.ownerEmail || null,
+      ccEmails: [],
+      enableEmail: true,
+      enableSMS: false
+    };
+  }
+  return this.notificationSettings;
+};
+
 module.exports = mongoose.model('Business', businessSchema);

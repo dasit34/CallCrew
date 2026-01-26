@@ -46,7 +46,11 @@ class EmailService {
    * @returns {Promise<Object>} Result with success, error, messageId
    */
   async sendLeadEmail({ business, lead, summary }) {
+    const leadId = lead._id?.toString() || lead.id || 'unknown';
+    const callSid = lead.callSid || 'unknown';
+    
     console.log('📧 EMAIL_SENDING');
+    console.log('LeadId:', leadId, 'CallSid:', callSid);
     console.log('Business:', business.businessName);
     console.log('Lead:', lead.name);
     console.log('Summary available:', !!summary);
@@ -64,21 +68,48 @@ class EmailService {
         };
       }
 
-      // Get recipients
-      const primaryEmail = business.notificationSettings?.primaryEmail;
+      // Get recipients with fallback to founderEmail for beta
+      // Handle backward compatibility for notificationSettings
+      const notificationSettings = business.notificationSettings || {
+        primaryEmail: business.ownerEmail || null,
+        ccEmails: [],
+        enableEmail: true,
+        enableSMS: false
+      };
+      
+      let primaryEmail = notificationSettings.primaryEmail;
+      const founderEmail = process.env.FOUNDER_EMAIL || 'alerts@callcrew.ai';
+      const sendToFounder = process.env.SEND_TO_FOUNDER !== 'false'; // Default true for beta
+
+      // Validate primaryEmail format if provided
+      if (primaryEmail) {
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(primaryEmail)) {
+          console.warn('⚠️ Invalid primaryEmail format, using fallback');
+          primaryEmail = null;
+        }
+      }
+
+      // Fallback logic: use founderEmail if primaryEmail missing and sendToFounder enabled
+      if (!primaryEmail && sendToFounder) {
+        console.log('⚠️ No primaryEmail, using founderEmail fallback:', founderEmail);
+        primaryEmail = founderEmail;
+      }
+
       if (!primaryEmail) {
-        const error = 'No primaryEmail configured for business';
+        const error = 'No primaryEmail configured and founderEmail fallback disabled';
         console.error('❌ EMAIL_FAILED:', error);
         return {
           success: false,
           error: error,
-          messageId: null
+          messageId: null,
+          recipients: []
         };
       }
 
       const recipients = [primaryEmail];
-      if (business.notificationSettings?.ccEmails?.length > 0) {
-        recipients.push(...business.notificationSettings.ccEmails);
+      if (notificationSettings.ccEmails?.length > 0) {
+        recipients.push(...notificationSettings.ccEmails);
       }
 
       console.log('Recipients:', recipients.join(', '));
@@ -93,11 +124,19 @@ class EmailService {
         return phone;
       };
 
-      // Build subject
+      // Limit transcript to 1000 characters
+      const transcriptExcerpt = lead.transcript
+        ? (lead.transcript.length > 1000 
+            ? lead.transcript.substring(0, 1000) + '...' 
+            : lead.transcript)
+        : 'Transcript unavailable';
+
+      // Build subject (exact format required)
+      const callerName = lead.name || 'Unknown';
       const shortReason = lead.reasonForCalling 
-        ? lead.reasonForCalling.substring(0, 50) 
-        : 'General inquiry';
-      const subject = `New Lead: ${lead.name || 'Unknown'} - ${shortReason}`;
+        ? lead.reasonForCalling.substring(0, 60).trim()
+        : 'General Inquiry';
+      const subject = `New CallCrew Lead – ${callerName} – ${shortReason}`;
 
       // Build HTML email
       const html = `
@@ -125,12 +164,10 @@ class EmailService {
     <h1>🎉 New Lead Captured</h1>
     <p><strong>${business.businessName}</strong></p>
     
-    ${summary ? `
     <div class="summary-box">
       <h2>AI Summary</h2>
-      <p>${summary.replace(/\n/g, '<br>')}</p>
+      <p>${summary ? summary.replace(/\n/g, '<br>') : 'AI summary unavailable for this call. Please review the transcript excerpt below.'}</p>
     </div>
-    ` : '<p style="color: #999; font-style: italic;">Summary unavailable</p>'}
     
     <h2>Lead Details</h2>
     <table>
@@ -160,16 +197,21 @@ class EmailService {
         <td>Call Time</td>
         <td>${new Date(lead.createdAt).toLocaleString()}</td>
       </tr>
+      <tr>
+        <td>Call SID</td>
+        <td class="call-sid">${lead.callSid || 'Not available'}</td>
+      </tr>
+      <tr>
+        <td>Lead ID</td>
+        <td class="call-sid">${leadId}</td>
+      </tr>
     </table>
     
-    ${lead.transcript ? `
-    <h2>Full Transcript</h2>
-    <div class="transcript">${lead.transcript}</div>
-    ` : ''}
+    <h2>Transcript Excerpt</h2>
+    <div class="transcript">${transcriptExcerpt.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
     
     <div class="footer">
       <p>This lead was captured by CallCrew AI Receptionist</p>
-      ${lead.callSid ? `<p class="call-sid">Call SID: ${lead.callSid}</p>` : ''}
       <p>${new Date().toLocaleString()}</p>
     </div>
   </div>
@@ -177,12 +219,15 @@ class EmailService {
 </html>
       `;
 
-      // Plain text version
-      const text = `
-NEW LEAD CAPTURED - ${business.businessName}
+      // Plain text version (ensure clean newlines)
+      const summaryText = summary 
+        ? `AI SUMMARY:\n${summary}\n` 
+        : 'AI summary unavailable for this call. Please review the transcript excerpt below.\n';
+      
+      const text = `NEW LEAD CAPTURED - ${business.businessName}
 ============================================
 
-${summary ? `AI SUMMARY:\n${summary}\n\n` : 'Summary unavailable\n\n'}
+${summaryText}
 
 LEAD DETAILS:
 - Name: ${lead.name || 'Not provided'}
@@ -191,14 +236,16 @@ ${lead.email ? `- Email: ${lead.email}\n` : ''}
 - Reason: ${lead.reasonForCalling || lead.interestedIn || 'Not specified'}
 - Quality: ${(lead.quality || 'unknown').toUpperCase()}
 - Call Time: ${new Date(lead.createdAt).toLocaleString()}
+- Call SID: ${lead.callSid || 'Not available'}
+- Lead ID: ${leadId}
 
-${lead.transcript ? `\nFULL TRANSCRIPT:\n${lead.transcript}\n` : ''}
+TRANSCRIPT EXCERPT:
+${transcriptExcerpt}
 
-${lead.callSid ? `Call SID: ${lead.callSid}\n` : ''}
 ============================================
 Captured by CallCrew AI Receptionist
 ${new Date().toLocaleString()}
-      `;
+      `.replace(/\n\n\n+/g, '\n\n'); // Clean up multiple newlines
 
       const emailFrom = process.env.EMAIL_FROM || `CallCrew <${smtpUser}>`;
 
@@ -211,17 +258,20 @@ ${new Date().toLocaleString()}
       });
 
       console.log('✅ EMAIL_SENT');
+      console.log('LeadId:', leadId, 'CallSid:', callSid);
       console.log('Message ID:', info.messageId);
       console.log('Recipients:', recipients.join(', '));
 
       return {
         success: true,
         error: null,
-        messageId: info.messageId
+        messageId: info.messageId,
+        recipients: recipients
       };
 
     } catch (error) {
       console.error('❌ EMAIL_FAILED');
+      console.error('LeadId:', leadId, 'CallSid:', callSid);
       console.error('Error name:', error.name);
       console.error('Error message:', error.message);
       console.error('Error code:', error.code);

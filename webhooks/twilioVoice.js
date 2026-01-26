@@ -583,44 +583,32 @@ RULES:
  * This is called after lead is captured and call is completed
  */
 async function handleCallComplete(call, business) {
+  const callSid = call.twilioCallSid || 'unknown';
+  let lead = null;
+  
   try {
     console.log('=== HANDLING CALL COMPLETE ===');
     console.log('Call ID:', call._id);
+    console.log('CallSid:', callSid);
     console.log('Business:', business.businessName);
 
     // Find the lead associated with this call
-    const lead = await Lead.findOne({ call: call._id }).sort({ createdAt: -1 });
+    lead = await Lead.findOne({ call: call._id }).sort({ createdAt: -1 });
     
     if (!lead) {
       console.log('⚠️ No lead found for call, skipping summary/email');
+      console.log('CallSid:', callSid);
       return;
     }
 
-    console.log('Lead found:', lead._id);
+    const leadId = lead._id.toString();
+    console.log('Lead found:', leadId);
     console.log('Lead name:', lead.name);
 
     // Format transcript as string
     const transcriptText = call.transcript
       ? call.transcript.map(entry => `${entry.role === 'assistant' ? 'AI' : 'Caller'}: ${entry.content}`).join('\n')
       : '';
-
-    // 1. Generate AI summary (non-blocking)
-    console.log('📝 Generating AI summary...');
-    const summary = await summaryService.generateSummary({
-      transcript: transcriptText,
-      name: lead.name,
-      phone: lead.phone,
-      reason: lead.reasonForCalling || lead.interestedIn || ''
-    });
-
-    // Update lead with summary
-    lead.aiSummary = {
-      text: summary.text,
-      status: summary.status,
-      model: summary.model || 'gpt-4o-mini',
-      generatedAt: summary.status === 'success' ? new Date() : null,
-      error: summary.error
-    };
 
     // Also update transcript and callSid if not set
     if (!lead.transcript && transcriptText) {
@@ -633,46 +621,121 @@ async function handleCallComplete(call, business) {
       lead.reasonForCalling = lead.interestedIn || lead.conversationSummary || '';
     }
 
-    await lead.save();
-    console.log('✅ Lead updated with summary');
-
-    // 2. Send email notification (non-blocking)
-    if (business.notificationSettings?.enableEmail && business.notificationSettings?.primaryEmail) {
-      console.log('📧 Sending email notification...');
-      const emailResult = await emailService.sendLeadEmail({
-        business,
-        lead,
-        summary: summary.text
+    // 1. Generate AI summary (non-blocking) - ALWAYS attempt
+    let summaryText = null;
+    let summaryStatus = 'failed';
+    let summaryError = null;
+    
+    try {
+      console.log('📝 Generating AI summary...');
+      const summary = await summaryService.generateSummary({
+        transcript: transcriptText,
+        name: lead.name,
+        phone: lead.phone,
+        reason: lead.reasonForCalling || lead.interestedIn || '',
+        leadId: leadId,
+        callSid: callSid
       });
 
-      lead.notification = {
-        status: emailResult.success ? 'sent' : 'failed',
-        sentAt: emailResult.success ? new Date() : null,
-        error: emailResult.error || null,
-        recipients: emailResult.success 
-          ? [business.notificationSettings.primaryEmail, ...(business.notificationSettings.ccEmails || [])]
-          : []
+      summaryText = summary.text;
+      summaryStatus = summary.status;
+      summaryError = summary.error;
+
+      // Update lead with summary (even if failed)
+      lead.aiSummary = {
+        text: summary.text,
+        status: summary.status,
+        model: summary.model || 'gpt-4o-mini',
+        generatedAt: summary.status === 'success' ? new Date() : new Date(),
+        error: summary.error
       };
 
       await lead.save();
-      console.log('✅ Lead updated with notification status');
+      console.log('✅ Lead updated with summary status:', summary.status);
+    } catch (summaryErr) {
+      console.error('❌ Summary generation exception:', summaryErr);
+      summaryError = summaryErr.message || 'Unknown error';
+      
+      // Still save failed status
+      lead.aiSummary = {
+        text: null,
+        status: 'failed',
+        model: 'gpt-4o-mini',
+        generatedAt: new Date(),
+        error: summaryError
+      };
+      await lead.save();
+    }
+
+    // Use fallback summary text if summary failed
+    const emailSummaryText = summaryText || 'AI summary unavailable for this call. Please review the transcript excerpt below.';
+
+    // 2. Send email notification (non-blocking) - ALWAYS attempt if enabled
+    // Ensure notificationSettings exists (backward compatibility)
+    const notificationSettings = business.getNotificationSettings 
+      ? business.getNotificationSettings() 
+      : (business.notificationSettings || {
+          primaryEmail: business.ownerEmail || null,
+          ccEmails: [],
+          enableEmail: true,
+          enableSMS: false
+        });
+    const enableEmail = notificationSettings.enableEmail !== false; // Default true
+
+    if (enableEmail) {
+      try {
+        console.log('📧 Sending email notification...');
+        const emailResult = await emailService.sendLeadEmail({
+          business: {
+            ...business.toObject(),
+            notificationSettings: notificationSettings
+          },
+          lead: lead,
+          summary: emailSummaryText // Use summary or fallback
+        });
+
+        // Always set notification object with recipients
+        lead.notification = {
+          status: emailResult.success ? 'sent' : 'failed',
+          sentAt: emailResult.success ? new Date() : null,
+          error: emailResult.error || null,
+          recipients: emailResult.recipients || (emailResult.success 
+            ? [notificationSettings.primaryEmail || process.env.FOUNDER_EMAIL || 'alerts@callcrew.ai', ...(notificationSettings.ccEmails || [])]
+            : [])
+        };
+
+        await lead.save();
+        console.log('✅ Lead updated with notification status:', lead.notification.status);
+      } catch (emailErr) {
+        console.error('❌ Email sending exception:', emailErr);
+        
+        // Save failed notification status
+        lead.notification = {
+          status: 'failed',
+          sentAt: null,
+          error: emailErr.message || 'Unknown error',
+          recipients: []
+        };
+        await lead.save();
+      }
     } else {
-      console.log('⚠️ Email notifications disabled or no primaryEmail configured');
+      console.log('⚠️ Email notifications disabled');
       lead.notification = {
-        status: 'pending',
+        status: 'failed',
         sentAt: null,
-        error: business.notificationSettings?.enableEmail === false 
-          ? 'Email notifications disabled' 
-          : 'No primaryEmail configured',
+        error: 'Email notifications disabled',
         recipients: []
       };
       await lead.save();
     }
 
-    console.log('✅ LEAD_PROCESSED:', lead._id);
+    console.log('✅ LEAD_PROCESSED');
+    console.log('LeadId:', leadId, 'CallSid:', callSid);
 
   } catch (error) {
-    console.error('❌ LEAD_PROCESSING_ERROR:', error);
+    console.error('❌ LEAD_PROCESSING_ERROR');
+    console.error('LeadId:', lead?._id?.toString() || 'unknown', 'CallSid:', callSid);
+    console.error('Error:', error.message);
     console.error('Error stack:', error.stack);
     // DO NOT crash - continue
   }

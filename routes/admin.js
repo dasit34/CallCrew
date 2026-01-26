@@ -673,7 +673,9 @@ AI: You're welcome! Have a great day!`;
       transcript: sampleTranscript,
       name: 'John Smith',
       phone: '+15551234567',
-      reason: 'Kitchen faucet leak'
+      reason: 'Kitchen faucet leak',
+      leadId: 'TEST_LEAD_123',
+      callSid: 'TEST_CALL_456'
     });
 
     res.json({
