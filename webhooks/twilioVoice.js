@@ -48,6 +48,24 @@ function sendTwiML(res, twiml) {
 }
 
 /**
+ * Run async fn, return { result, ms }. Used for latency instrumentation.
+ */
+async function measure(name, fn) {
+  const start = Date.now();
+  const result = await fn();
+  return { result, ms: Date.now() - start };
+}
+
+/**
+ * Log turn-by-turn latency as JSON one-liner for Railway log parsing.
+ * Fields: stt_ms (0; Twilio does STT), llm_ms, tts_ms, db_ms, total_turn_ms, callSid, turnIndex.
+ * Grep Railway logs for _type: "turn_latency" or "turn_latency".
+ */
+function logTurnLatency(payload) {
+  console.log(JSON.stringify({ _type: 'turn_latency', ...payload }));
+}
+
+/**
  * Generate TwiML for gathering speech input
  */
 function generateGatherResponse(sayText, voice = VOICE) {
@@ -56,7 +74,7 @@ function generateGatherResponse(sayText, voice = VOICE) {
     input: 'speech',
     action: '/webhooks/twilio/gather',
     method: 'POST',
-    speechTimeout: 3,  // Wait 3s after speech stops before processing
+    speechTimeout: 2,  // Shorter trailing silence = faster turn-around (was 3)
     timeout: 10,       // Allow 10s for user to start speaking
     language: 'en-US'
   });
@@ -244,6 +262,58 @@ async function saveTranscript(callSid) {
 }
 
 /**
+ * Detect SALES/ProductInfo intent from user utterance
+ * Returns { isSales: boolean, subtype: string, response: string }
+ */
+function detectSalesIntent(question, businessName) {
+  if (!question) return { isSales: false };
+  
+  const lower = question.toLowerCase();
+  
+  // SALES intent patterns - explicit interest signals
+  const salesPatterns = {
+    demo: {
+      keywords: ['demo', 'demonstration', 'show me', 'see it in action', 'try it', 'trial'],
+      response: `I'd love to get you set up with a demo! Let me make sure we have your info so our team can schedule a quick walkthrough. Can I confirm your phone number?`
+    },
+    pricing: {
+      keywords: ['pricing', 'price', 'cost', 'how much', 'fee', 'rate', 'subscription', 'plan', 'package'],
+      response: `Great question! Pricing depends on your call volume and specific needs. Our team can put together a custom quote for you. Can I confirm your contact info so they can reach out with details?`
+    },
+    interested: {
+      keywords: ['interested', 'want to sign up', 'want to try', 'sign me up', 'get started', 'set me up', 'learn more'],
+      response: `That's great to hear! I'll make sure our team follows up to get you set up. Can I confirm the best number to reach you?`
+    },
+    howItWorks: {
+      keywords: ['how does it work', 'how it works', 'what does it do', 'tell me about', 'explain', 'what is callcrew', 'what is this'],
+      response: `${businessName || 'CallCrew'} is an AI phone receptionist that answers calls 24/7, captures lead info, and sends you instant notifications. It handles FAQs, takes messages, and ensures you never miss a potential customer. Would you like to see it in action with a demo?`
+    },
+    features: {
+      keywords: ['feature', 'capability', 'can it', 'does it', 'what can', 'functionality'],
+      response: `${businessName || 'CallCrew'} can answer calls 24/7, capture caller information, answer frequently asked questions, send email notifications for each lead, and provide call transcripts. Is there a specific feature you'd like to know more about?`
+    },
+    comparison: {
+      keywords: ['compared to', 'vs', 'versus', 'better than', 'difference between', 'competitor'],
+      response: `Great question! Our team can walk you through how ${businessName || 'CallCrew'} compares to other solutions. Can I get your contact info so they can give you a detailed comparison?`
+    }
+  };
+  
+  // Check each pattern
+  for (const [subtype, pattern] of Object.entries(salesPatterns)) {
+    if (pattern.keywords.some(kw => lower.includes(kw))) {
+      console.log(`=== SALES INTENT DETECTED: ${subtype} ===`);
+      return {
+        isSales: true,
+        subtype,
+        response: pattern.response
+      };
+    }
+  }
+  
+  return { isSales: false };
+}
+
+/**
  * Check FAQs for matching answer (no OpenAI needed)
  * Returns answer string or null if no match
  */
@@ -258,7 +328,9 @@ function checkFAQs(question, faqs) {
     { keywords: ['price', 'cost', 'how much', 'fee', 'rate'], type: 'pricing' },
     { keywords: ['location', 'address', 'where', 'directions'], type: 'location' },
     { keywords: ['appointment', 'book', 'schedule', 'available'], type: 'booking' },
-    { keywords: ['service', 'offer', 'provide', 'do you'], type: 'services' }
+    { keywords: ['service', 'offer', 'provide', 'do you'], type: 'services' },
+    { keywords: ['demo', 'trial', 'try', 'test'], type: 'demo' },
+    { keywords: ['feature', 'capability', 'work', 'function'], type: 'features' }
   ];
   
   for (const faq of faqs) {
@@ -524,7 +596,7 @@ router.post('/voice', async (req, res) => {
       input: 'speech',
       action: '/webhooks/twilio/gather',
       method: 'POST',
-      speechTimeout: 3,  // Wait 3s after speech stops before processing
+      speechTimeout: 2,  // Shorter trailing silence = faster turn-around (was 3)
       timeout: 10,       // Allow 10s for user to start speaking
       language: 'en-US'
     });
@@ -547,6 +619,9 @@ router.post('/voice', async (req, res) => {
  * Most stages are SCRIPTED (no OpenAI)
  */
 router.post('/gather', async (req, res) => {
+  const turnStart = Date.now();
+  const timing = { stt_ms: 0, llm_ms: 0, tts_ms: 0, db_ms: 0 };
+  let turnIndex = -1;
   const twiml = new VoiceResponse();
   
   console.log('=== SPEECH INPUT ===');
@@ -555,6 +630,30 @@ router.post('/gather', async (req, res) => {
   console.log('Confidence:', req.body.Confidence);
   console.log('====================');
   
+  const emitTurnLatency = (callSidForLog) => {
+    const total_turn_ms = Date.now() - turnStart;
+    logTurnLatency({
+      callSid: callSidForLog || req.body?.CallSid || '',
+      turnIndex,
+      stt_ms: timing.stt_ms,
+      llm_ms: timing.llm_ms,
+      tts_ms: timing.tts_ms,
+      db_ms: timing.db_ms,
+      total_turn_ms
+    });
+  };
+
+  const runDb = async (fn) => {
+    const { result, ms } = await measure('db', fn);
+    timing.db_ms += ms;
+    return result;
+  };
+  const runLlm = async (fn) => {
+    const { result, ms } = await measure('llm', fn);
+    timing.llm_ms += ms;
+    return result;
+  };
+
   try {
     const callSid = req.body.CallSid || '';
     const speechResult = req.body.SpeechResult || '';
@@ -566,31 +665,45 @@ router.post('/gather', async (req, res) => {
       console.error('No CallSid in request');
       twiml.say({ voice: VOICE }, 'Sorry, there was a connection error. Goodbye.');
       twiml.hangup();
-      return sendTwiML(res, twiml);
+      const { ms } = await measure('tts', () => sendTwiML(res, twiml));
+      timing.tts_ms += ms;
+      emitTurnLatency('');
+      return;
     }
 
     let conversation = conversations.get(callSid);
     
     if (!conversation) {
       console.warn(`No in-memory conversation for CallSid: ${callSid}. Attempting recovery from CallState.`);
-      const state = await CallState.findOne({ callSid });
+      const dbRecovery = await measure('db', async () => {
+        const state = await CallState.findOne({ callSid });
+        if (!state) return { state: null, call: null, business: null };
+        const call = await Call.findOne({ twilioCallSid: callSid }).populate('business');
+        return { state, call, business: call?.business };
+      });
+      timing.db_ms += dbRecovery.ms;
+      const { state, call, business } = dbRecovery.result;
 
       if (!state) {
         console.error(`No conversation or CallState found for CallSid: ${callSid}`);
         twiml.say({ voice: VOICE }, 'Sorry, there was an error with your call. Goodbye.');
         twiml.hangup();
-        return sendTwiML(res, twiml);
+        const { ms } = await measure('tts', () => sendTwiML(res, twiml));
+        timing.tts_ms += ms;
+        emitTurnLatency(callSid);
+        return;
       }
 
-      const call = await Call.findOne({ twilioCallSid: callSid }).populate('business');
-      if (!call || !call.business) {
+      if (!call || !business) {
         console.error(`Unable to reconstruct conversation for CallSid: ${callSid} (missing Call/Business)`);
         twiml.say({ voice: VOICE }, 'Sorry, there was an error with your call. Goodbye.');
         twiml.hangup();
-        return sendTwiML(res, twiml);
+        const { ms } = await measure('tts', () => sendTwiML(res, twiml));
+        timing.tts_ms += ms;
+        emitTurnLatency(callSid);
+        return;
       }
 
-      const business = call.business;
       conversation = {
         businessId: business._id.toString(),
         businessName: business.businessName,
@@ -601,7 +714,7 @@ router.post('/gather', async (req, res) => {
           phone: state.collectedData?.phone || null,
           reason: state.collectedData?.reason || null
         },
-        history: [], // We could hydrate from state.transcript if needed
+        history: [],
         faqs: business.faqs || [],
         services: business.services || [],
         customInstructions: business.customInstructions || '',
@@ -615,10 +728,13 @@ router.post('/gather', async (req, res) => {
 
     // Handle empty speech input
     if (!speechResult || speechResult.trim() === '') {
+      conversation.turnIndex = (conversation.turnIndex ?? 0) + 1;
+      turnIndex = conversation.turnIndex;
       conversation.noInputCount = (conversation.noInputCount || 0) + 1;
-      await updateCallState(callSid, { timeoutCount: conversation.noInputCount });
+      await runDb(() => updateCallState(callSid, { timeoutCount: conversation.noInputCount }));
       
       if (conversation.noInputCount >= 3) {
+        emitTurnLatency(callSid);
         return await endCall(callSid, twiml, res, "I'm having trouble hearing you. Thank you for calling. Goodbye!");
       }
       
@@ -626,13 +742,16 @@ router.post('/gather', async (req, res) => {
         input: 'speech',
         action: '/webhooks/twilio/gather',
         method: 'POST',
-        speechTimeout: 3,  // Wait 3s after speech stops before processing
-        timeout: 10,       // Allow 10s for user to start speaking
+        speechTimeout: 2,
+        timeout: 10,
         language: 'en-US'
       });
       gather.say({ voice: VOICE }, "I didn't catch that. Could you please repeat?");
       twiml.redirect({ method: 'POST' }, '/webhooks/twilio/no-input?CallSid=' + callSid);
-      return sendTwiML(res, twiml);
+      const { ms: ttsMs } = await measure('tts', () => sendTwiML(res, twiml));
+      timing.tts_ms += ttsMs;
+      emitTurnLatency(callSid);
+      return;
     }
 
     console.log(`Speech confidence: ${confidence} for: "${speechResult}"`);
@@ -640,54 +759,76 @@ router.post('/gather', async (req, res) => {
     // Handle low confidence with CallState-backed attempts
     if (confidence < MIN_CONFIDENCE) {
       console.log(`⚠ Low confidence (${confidence}): "${speechResult}"`);
+      conversation.turnIndex = (conversation.turnIndex ?? 0) + 1;
+      turnIndex = conversation.turnIndex;
 
-      const state = await getCallState(callSid);
-      state.lowConfidenceAttempts = (state.lowConfidenceAttempts || 0) + 1;
+      const lowConfResult = await runDb(async () => {
+        const state = await getCallState(callSid);
+        state.lowConfidenceAttempts = (state.lowConfidenceAttempts || 0) + 1;
+        if (state.lowConfidenceAttempts >= 2) {
+          state.lowConfidenceAttempts = 0;
+          await state.save();
+          await updateCallState(callSid, { lowConfidenceAttempts: 0 });
+        } else {
+          await state.save();
+          await updateCallState(callSid, { lowConfidenceAttempts: state.lowConfidenceAttempts });
+        }
+        return state.lowConfidenceAttempts;
+      });
 
-      if (state.lowConfidenceAttempts >= 2) {
-        // After 2 attempts, accept it anyway
-        console.log('✓ Accepting low confidence input after 2 attempts');
-        state.lowConfidenceAttempts = 0;
-        await state.save();
-        await updateCallState(callSid, { lowConfidenceAttempts: 0 });
+      if (lowConfResult === 0) {
+        // Accepted after 2 attempts – fall through to main flow
       } else {
-        await state.save();
-        await updateCallState(callSid, { lowConfidenceAttempts: state.lowConfidenceAttempts });
-
         const gather = twiml.gather({
           input: 'speech',
           action: '/webhooks/twilio/gather',
           method: 'POST',
-          speechTimeout: 3,  // Wait 3s after speech stops before processing
-          timeout: 10,       // Allow 10s for user to start speaking
+          speechTimeout: 2,
+          timeout: 10,
           language: 'en-US'
         });
         gather.say({ voice: VOICE }, "Sorry, I had trouble understanding. Could you say that again?");
         twiml.redirect({ method: 'POST' }, '/webhooks/twilio/no-input?CallSid=' + callSid);
-        return sendTwiML(res, twiml);
+        const { ms: ttsMs } = await measure('tts', () => sendTwiML(res, twiml));
+        timing.tts_ms += ttsMs;
+        emitTurnLatency(callSid);
+        return;
       }
     }
 
     // Reset no-input count
     conversation.noInputCount = 0;
-    await updateCallState(callSid, { timeoutCount: 0 });
+    await runDb(() => updateCallState(callSid, { timeoutCount: 0 }));
 
     // Get call document
-    const call = await Call.findById(conversation.callId);
+    const call = await runDb(() => Call.findById(conversation.callId));
     if (!call) {
       console.error(`No call document found for callId: ${conversation.callId}`);
+      conversation.turnIndex = (conversation.turnIndex ?? 0) + 1;
+      turnIndex = conversation.turnIndex;
       twiml.say({ voice: VOICE }, 'Sorry, there was an error. Goodbye.');
       twiml.hangup();
-      return sendTwiML(res, twiml);
+      const { ms } = await measure('tts', () => sendTwiML(res, twiml));
+      timing.tts_ms += ms;
+      emitTurnLatency(callSid);
+      return;
     }
 
-    // Add user message to transcript (Call + CallState)
-    await call.addTranscriptEntry('user', speechResult);
+    // Add user message to history; defer DB transcript writes (don't block response)
     conversation.history.push({ role: 'user', content: speechResult });
-    await addToTranscript(callSid, 'user', speechResult);
+    runDb(async () => {
+      await call.addTranscriptEntry('user', speechResult);
+      await addToTranscript(callSid, 'user', speechResult);
+    }).catch(err => console.error('Deferred user transcript write error:', err));
+
+    if (turnIndex === -1) {
+      conversation.turnIndex = (conversation.turnIndex ?? 0) + 1;
+      turnIndex = conversation.turnIndex;
+    }
 
     // Check for goodbye at any stage (stage-aware)
     if (isGoodbye(speechResult, conversation.stage)) {
+      emitTurnLatency(callSid);
       return await endCall(callSid, twiml, res, `Thank you for calling ${conversation.businessName}. We'll be in touch soon. Have a great day!`);
     }
 
@@ -727,7 +868,7 @@ router.post('/gather', async (req, res) => {
           console.log('Collected name:', conversation.collectedInfo.name);
           
           // Store current question before asking
-          await updateCallState(callSid, {
+          await runDb(() => updateCallState(callSid, {
             stage: STAGES.GET_PHONE,
             currentQuestion: phoneQuestion,
             collectedData: {
@@ -735,7 +876,7 @@ router.post('/gather', async (req, res) => {
               phone: conversation.collectedInfo.phone,
               reason: conversation.collectedInfo.reason
             }
-          });
+          }));
         }
         break;
       }
@@ -766,7 +907,7 @@ router.post('/gather', async (req, res) => {
           console.log('Collected phone:', conversation.collectedInfo.phone);
           
           // Store current question before asking
-          await updateCallState(callSid, {
+          await runDb(() => updateCallState(callSid, {
             stage: STAGES.GET_REASON,
             currentQuestion: reasonQuestion,
             collectedData: {
@@ -774,13 +915,13 @@ router.post('/gather', async (req, res) => {
               phone: conversation.collectedInfo.phone,
               reason: conversation.collectedInfo.reason
             }
-          });
+          }));
         }
         break;
       }
 
       // ----------------------------------------
-      // STAGE: GET_REASON (Check FAQs first, then OpenAI if needed)
+      // STAGE: GET_REASON (Check SALES intent, then FAQs, then OpenAI)
       // ----------------------------------------
       case STAGES.GET_REASON: {
         const reasonValidation = isValidInput(speechResult, STAGES.GET_REASON);
@@ -792,36 +933,45 @@ router.post('/gather', async (req, res) => {
         } else {
           conversation.collectedInfo.reason = speechResult;
           console.log('Collected reason:', speechResult);
-          await updateCallState(callSid, {
+          await runDb(() => updateCallState(callSid, {
             stage: STAGES.GET_REASON,
             collectedData: {
               name: conversation.collectedInfo.name,
               phone: conversation.collectedInfo.phone,
               reason: conversation.collectedInfo.reason
             }
-          });
+          }));
           
-          // Try to answer from FAQs first (no OpenAI)
-          const faqAnswer = checkFAQs(speechResult, conversation.faqs);
+          // 1. Check for SALES intent first (no OpenAI needed)
+          const salesIntent = detectSalesIntent(speechResult, conversation.businessName);
           
-          if (faqAnswer) {
-            console.log('=== FAQ MATCH (No OpenAI) ===');
-            response = `${faqAnswer} Is there anything else I can help you with?`;
+          if (salesIntent.isSales) {
+            console.log(`=== SALES INTENT: ${salesIntent.subtype} (No OpenAI) ===`);
+            response = `${salesIntent.response} Is there anything else I can help you with?`;
             nextStage = STAGES.FOLLOW_UP;
           } else {
-            // Need OpenAI for this question
-            console.log('=== USING OPENAI ===');
-            const aiResponse = await getAIResponse(speechResult, conversation);
-            response = `${aiResponse} Is there anything else I can help you with?`;
-            nextStage = STAGES.FOLLOW_UP;
-            conversation.questionCount++;
+            // 2. Try to answer from FAQs (no OpenAI)
+            const faqAnswer = checkFAQs(speechResult, conversation.faqs);
+            
+            if (faqAnswer) {
+              console.log('=== FAQ MATCH (No OpenAI) ===');
+              response = `${faqAnswer} Is there anything else I can help you with?`;
+              nextStage = STAGES.FOLLOW_UP;
+            } else {
+              // 3. Need OpenAI for this question
+              console.log('=== USING OPENAI ===');
+              const aiResponse = await runLlm(() => getAIResponse(speechResult, conversation));
+              response = `${aiResponse} Is there anything else I can help you with?`;
+              nextStage = STAGES.FOLLOW_UP;
+              conversation.questionCount++;
+            }
           }
         }
         break;
       }
 
       // ----------------------------------------
-      // STAGE: FOLLOW_UP (Check for more questions or end)
+      // STAGE: FOLLOW_UP (Check SALES intent, FAQs, then OpenAI)
       // ----------------------------------------
       case STAGES.FOLLOW_UP: {
         // Check if they're done
@@ -831,24 +981,33 @@ router.post('/gather', async (req, res) => {
           const closingMsg = phone 
             ? `Great! We'll reach out to ${name} at ${phone} soon. Thank you for calling ${conversation.businessName}. Have a wonderful day!`
             : `Great! Thank you for calling ${conversation.businessName}. Have a wonderful day!`;
+          emitTurnLatency(callSid);
           return await endCall(callSid, twiml, res, closingMsg);
         }
         
-        // They have another question - try FAQs first
-        const followUpFaqAnswer = checkFAQs(speechResult, conversation.faqs);
+        // 1. Check for SALES intent first (no OpenAI needed)
+        const followUpSalesIntent = detectSalesIntent(speechResult, conversation.businessName);
         
-        if (followUpFaqAnswer) {
-          console.log('=== FAQ MATCH (No OpenAI) ===');
-          response = `${followUpFaqAnswer} Anything else?`;
-        } else if (conversation.questionCount < 3) {
-          // Use OpenAI for complex questions (limit to 3)
-          console.log('=== USING OPENAI ===');
-          const aiResponse = await getAIResponse(speechResult, conversation);
-          response = `${aiResponse} Anything else I can help with?`;
-          conversation.questionCount++;
+        if (followUpSalesIntent.isSales) {
+          console.log(`=== SALES INTENT: ${followUpSalesIntent.subtype} (No OpenAI) ===`);
+          response = `${followUpSalesIntent.response} Anything else?`;
         } else {
-          // Too many questions - offer callback
-          response = `That's a great question! Let me have someone call you back with more details. Is there anything else?`;
+          // 2. Try FAQs
+          const followUpFaqAnswer = checkFAQs(speechResult, conversation.faqs);
+          
+          if (followUpFaqAnswer) {
+            console.log('=== FAQ MATCH (No OpenAI) ===');
+            response = `${followUpFaqAnswer} Anything else?`;
+          } else if (conversation.questionCount < 3) {
+            // 3. Use OpenAI for complex questions (limit to 3)
+            console.log('=== USING OPENAI ===');
+            const aiResponse = await runLlm(() => getAIResponse(speechResult, conversation));
+            response = `${aiResponse} Anything else I can help with?`;
+            conversation.questionCount++;
+          } else {
+            // 4. Max questions reached - neutral handoff
+            response = `Got it — I'll have our team follow up shortly. Can I confirm the best number to reach you is ${conversation.collectedInfo.phone || 'the one you called from'}?`;
+          }
         }
         
         nextStage = STAGES.FOLLOW_UP;
@@ -862,27 +1021,32 @@ router.post('/gather', async (req, res) => {
 
     // Update stage
     conversation.stage = nextStage;
-
-    // Add response to transcript and history
-    await call.addTranscriptEntry('assistant', response);
     conversation.history.push({ role: 'assistant', content: response });
 
     console.log('Response:', response);
     console.log('Next stage:', nextStage);
 
-    // Generate TwiML response
+    // Generate TwiML and send immediately (don't block on DB)
     const gather = twiml.gather({
       input: 'speech',
       action: '/webhooks/twilio/gather',
       method: 'POST',
-      speechTimeout: 3,  // Wait 3s after speech stops before processing
+      speechTimeout: 2,  // Shorter trailing silence = faster turn-around (was 3)
       timeout: 10,       // Allow 10s for user to start speaking
       language: 'en-US'
     });
     gather.say({ voice: VOICE }, response);
     twiml.redirect({ method: 'POST' }, '/webhooks/twilio/no-input?CallSid=' + callSid);
 
-    return sendTwiML(res, twiml);
+    const { ms: ttsMs } = await measure('tts', () => sendTwiML(res, twiml));
+    timing.tts_ms += ttsMs;
+    emitTurnLatency(callSid);
+
+    // Fire-and-forget transcript write so we don't block Twilio response
+    runDb(() => call.addTranscriptEntry('assistant', response)).catch(err =>
+      console.error('Deferred transcript write error:', err)
+    );
+    return;
 
   } catch (error) {
     console.error('Error in gather webhook:', error);
@@ -892,8 +1056,8 @@ router.post('/gather', async (req, res) => {
       input: 'speech',
       action: '/webhooks/twilio/gather',
       method: 'POST',
-      speechTimeout: 3,  // Wait 3s after speech stops before processing
-      timeout: 10,       // Allow 10s for user to start speaking
+      speechTimeout: 2,
+      timeout: 10,
       language: 'en-US'
     });
     gather.say({ voice: VOICE }, "I'm sorry, I had trouble with that. Could you please repeat?");
@@ -905,15 +1069,27 @@ router.post('/gather', async (req, res) => {
       twiml.hangup();
     }
     
-    return sendTwiML(res, twiml);
+    const { ms: ttsMs } = await measure('tts', () => sendTwiML(res, twiml));
+    timing.tts_ms += ttsMs;
+    emitTurnLatency(req.body?.CallSid);
+    return;
   }
 });
 
 /**
- * Get AI response for complex questions (ONLY place that calls OpenAI)
+ * Get AI response for complex questions (ONLY place that calls OpenAI).
+ * Single LLM call per turn; no classify-then-answer-then-summarize chain.
+ * Summary runs only at call end (handleCallComplete).
  */
 async function getAIResponse(question, conversation) {
   try {
+    // First check for SALES intent (no OpenAI needed)
+    const salesIntent = detectSalesIntent(question, conversation.businessName);
+    if (salesIntent.isSales) {
+      console.log(`=== SALES INTENT in getAIResponse: ${salesIntent.subtype} ===`);
+      return salesIntent.response;
+    }
+    
     const systemPrompt = `You are a helpful receptionist for ${conversation.businessName}.
 ${conversation.customInstructions ? `Business info: ${conversation.customInstructions}` : ''}
 ${conversation.services?.length > 0 ? `Services: ${conversation.services.map(s => s.name).join(', ')}` : ''}
@@ -921,8 +1097,9 @@ ${conversation.services?.length > 0 ? `Services: ${conversation.services.map(s =
 RULES:
 - Answer in 1-2 sentences MAX
 - Be friendly and helpful
-- If you don't know something, say "Let me have someone get back to you with that information"
-- Never make up information`;
+- If you don't know something, say "Got it, I'll have our team follow up with that information"
+- Never make up information
+- For pricing/demo/sign-up questions, offer to have the team follow up with details`;
 
     const response = await openaiService.processConversation(
       [{ role: 'user', content: question }],
@@ -930,12 +1107,12 @@ RULES:
       { maxTokens: 100 }
     );
 
-    return response.response || "Let me have someone get back to you with more details on that.";
+    return response.response || "Got it — I'll have our team follow up with that information shortly.";
     
   } catch (error) {
     console.error('OpenAI API Error:', error);
-    // Graceful fallback - no crash
-    return "That's a great question! Let me have someone call you back with more details.";
+    // Graceful fallback - no crash, neutral handoff
+    return "Got it — I'll make sure our team follows up with you on that.";
   }
 }
 
@@ -1258,7 +1435,7 @@ router.post('/no-input', async (req, res) => {
       input: 'speech',
       action: '/webhooks/twilio/gather',
       method: 'POST',
-      speechTimeout: 3,
+      speechTimeout: 2,
       timeout: 10,
       language: 'en-US'
     });
@@ -1272,7 +1449,7 @@ router.post('/no-input', async (req, res) => {
     input: 'speech',
     action: '/webhooks/twilio/gather',
     method: 'POST',
-    speechTimeout: 3,  // Wait 3s after speech stops before processing
+    speechTimeout: 2,  // Shorter trailing silence = faster turn-around (was 3)
     timeout: 10,       // Allow 10s for user to start speaking
     language: 'en-US'
   });

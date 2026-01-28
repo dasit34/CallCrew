@@ -7,17 +7,29 @@ class NumberProvisioningService {
   }
 
   /**
+   * Get BASE_URL for webhooks (required for provisioning).
+   * @returns {string}
+   */
+  getBaseUrl() {
+    const url = process.env.BASE_URL || process.env.WEBHOOK_BASE_URL;
+    if (!url || typeof url !== 'string' || !url.startsWith('http')) {
+      throw new Error('BASE_URL or WEBHOOK_BASE_URL must be set and start with http(s) for Twilio webhooks');
+    }
+    return url.replace(/\/$/, '');
+  }
+
+  /**
    * Initialize the Twilio client
    * @returns {Object} The Twilio client for direct access
    */
   initialize() {
     if (this.initialized) return this.client;
-    
+
     const accountSid = process.env.TWILIO_ACCOUNT_SID;
     const authToken = process.env.TWILIO_AUTH_TOKEN;
 
     if (!accountSid || !authToken) {
-      throw new Error('Twilio credentials not configured');
+      throw new Error('TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN must be set in .env');
     }
 
     this.client = twilio(accountSid, authToken);
@@ -107,24 +119,30 @@ class NumberProvisioningService {
 
   /**
    * Provision (purchase) a phone number
-   * @param {string} phoneNumber - The phone number to purchase
-   * @param {string} businessId - The business ID to associate with this number
+   * @param {string} phoneNumber - The phone number to purchase (E.164)
+   * @param {string} friendlyNameSuffix - Suffix for friendly name (e.g. 'onboarding', businessId)
+   * @param {string} [baseUrl] - Base URL for webhooks (default: getBaseUrl())
+   * @returns {Promise<{phoneNumber: string, phoneSid: string, ...}>}
    */
-  async provisionNumber(phoneNumber, businessId) {
+  async provisionNumber(phoneNumber, friendlyNameSuffix, baseUrl) {
     this.initialize();
+    const base = baseUrl || this.getBaseUrl();
 
     try {
-      const baseUrl = process.env.BASE_URL || process.env.WEBHOOK_BASE_URL || 'https://your-domain.com';
-      
+      const voiceUrl = `${base}/webhooks/twilio/voice`;
+      const statusCallback = `${base}/webhooks/twilio/status`;
+      console.log('[provision] Purchasing', phoneNumber, '| voiceUrl:', voiceUrl);
+
       const incomingPhoneNumber = await this.client.incomingPhoneNumbers.create({
-        phoneNumber: phoneNumber,
-        voiceUrl: `${baseUrl}/webhooks/twilio/voice`,
+        phoneNumber,
+        voiceUrl,
         voiceMethod: 'POST',
-        statusCallback: `${baseUrl}/webhooks/twilio/status`,
+        statusCallback,
         statusCallbackMethod: 'POST',
-        friendlyName: `CallCrew - ${businessId}`
+        friendlyName: `CallCrew - ${friendlyNameSuffix}`
       });
 
+      console.log('[provision] Purchased', incomingPhoneNumber.phoneNumber, 'SID:', incomingPhoneNumber.sid);
       return {
         phoneNumber: incomingPhoneNumber.phoneNumber,
         phoneSid: incomingPhoneNumber.sid,
@@ -132,35 +150,42 @@ class NumberProvisioningService {
         voiceUrl: incomingPhoneNumber.voiceUrl,
         dateCreated: incomingPhoneNumber.dateCreated
       };
-    } catch (error) {
-      console.error('Error provisioning number:', error);
-      throw new Error(`Failed to provision number: ${error.message}`);
+    } catch (err) {
+      console.error('[provision] Failed to purchase', phoneNumber, err?.message || err);
+      throw new Error(`Failed to provision number: ${err?.message || err}`);
     }
   }
 
   /**
    * Update webhook URLs for a phone number
    * @param {string} phoneSid - The Twilio Phone SID
-   * @param {Object} webhooks - Webhook URLs to update
+   * @param {Object|string} webhooksOrBaseUrl - { voiceUrl, statusCallback } or baseUrl string
    */
-  async updateWebhooks(phoneSid, webhooks = {}) {
+  async updateWebhooks(phoneSid, webhooksOrBaseUrl = {}) {
     this.initialize();
 
+    let voiceUrl;
+    let statusCallback;
+    if (typeof webhooksOrBaseUrl === 'string') {
+      const base = webhooksOrBaseUrl.replace(/\/$/, '');
+      voiceUrl = `${base}/webhooks/twilio/voice`;
+      statusCallback = `${base}/webhooks/twilio/status`;
+    } else {
+      voiceUrl = webhooksOrBaseUrl.voiceUrl;
+      statusCallback = webhooksOrBaseUrl.statusCallback;
+    }
+    if (!voiceUrl) voiceUrl = `${this.getBaseUrl()}/webhooks/twilio/voice`;
+    if (!statusCallback) statusCallback = `${this.getBaseUrl()}/webhooks/twilio/status`;
+
     try {
-      const updateParams = {};
-      
-      if (webhooks.voiceUrl) {
-        updateParams.voiceUrl = webhooks.voiceUrl;
-        updateParams.voiceMethod = 'POST';
-      }
-      
-      if (webhooks.statusCallback) {
-        updateParams.statusCallback = webhooks.statusCallback;
-        updateParams.statusCallbackMethod = 'POST';
-      }
-      
-      if (webhooks.smsUrl) {
-        updateParams.smsUrl = webhooks.smsUrl;
+      const updateParams = {
+        voiceUrl,
+        voiceMethod: 'POST',
+        statusCallback,
+        statusCallbackMethod: 'POST'
+      };
+      if (webhooksOrBaseUrl && typeof webhooksOrBaseUrl === 'object' && webhooksOrBaseUrl.smsUrl) {
+        updateParams.smsUrl = webhooksOrBaseUrl.smsUrl;
         updateParams.smsMethod = 'POST';
       }
 
@@ -168,16 +193,78 @@ class NumberProvisioningService {
         .incomingPhoneNumbers(phoneSid)
         .update(updateParams);
 
+      console.log('[updateWebhooks] Updated', phoneSid, 'voiceUrl:', updated.voiceUrl);
       return {
         phoneNumber: updated.phoneNumber,
         phoneSid: updated.sid,
         voiceUrl: updated.voiceUrl,
         statusCallback: updated.statusCallback
       };
-    } catch (error) {
-      console.error('Error updating webhooks:', error);
-      throw new Error(`Failed to update webhooks: ${error.message}`);
+    } catch (err) {
+      console.error('[updateWebhooks] Failed for', phoneSid, err?.message || err);
+      throw new Error(`Failed to update webhooks: ${err?.message || err}`);
     }
+  }
+
+  /**
+   * Search, purchase, and configure a Twilio number for onboarding.
+   * Tries US local numbers first, then US toll-free. Sets voice + status webhooks.
+   * @param {Object} [options] - { baseUrl?: string, areaCode?: string }
+   * @returns {Promise<{phoneNumber: string, phoneSid: string}|null>}
+   */
+  async provisionForOnboarding(options = {}) {
+    let baseUrl = options.baseUrl;
+    if (!baseUrl || typeof baseUrl !== 'string' || !baseUrl.startsWith('http')) {
+      try {
+        baseUrl = this.getBaseUrl();
+      } catch (e) {
+        console.error('[provisionForOnboarding] BASE_URL/WEBHOOK_BASE_URL not set; cannot provision');
+        return null;
+      }
+    }
+    baseUrl = baseUrl.replace(/\/$/, '');
+    this.initialize();
+
+    let candidates = [];
+
+    try {
+      const local = await this.searchAvailableNumbers({
+        country: 'US',
+        voiceEnabled: true,
+        limit: 10,
+        areaCode: options.areaCode
+      });
+      if (local && local.length > 0) {
+        candidates = local;
+        console.log('[provisionForOnboarding] Local numbers found:', local.length);
+      }
+    } catch (err) {
+      console.warn('[provisionForOnboarding] Local search failed:', err?.message || err);
+    }
+
+    if (candidates.length === 0) {
+      try {
+        const tollFree = await this.client
+          .availablePhoneNumbers('US')
+          .tollFree.list({ voiceEnabled: true, limit: 10 });
+        if (tollFree && tollFree.length > 0) {
+          candidates = tollFree.map((n) => ({ phoneNumber: n.phoneNumber }));
+          console.log('[provisionForOnboarding] Toll-free numbers found:', tollFree.length);
+        }
+      } catch (err) {
+        console.warn('[provisionForOnboarding] Toll-free search failed:', err?.message || err);
+      }
+    }
+
+    if (candidates.length === 0) {
+      console.error('[provisionForOnboarding] No numbers available (local or toll-free)');
+      return null;
+    }
+
+    const phoneToBuy = candidates[0].phoneNumber;
+    const provisioned = await this.provisionNumber(phoneToBuy, 'onboarding', baseUrl);
+    await this.updateWebhooks(provisioned.phoneSid, baseUrl);
+    return { phoneNumber: provisioned.phoneNumber, phoneSid: provisioned.phoneSid };
   }
 
   /**

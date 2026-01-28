@@ -148,55 +148,41 @@ router.post('/create', async (req, res) => {
     const template = await IndustryTemplate.getBySlug(industry);
 
     // AUTOMATIC PHONE PROVISIONING
-    // If no phone number was selected, search for and provision one automatically
+    // If no phone number was selected, search for and provision one (local → toll-free)
     let provisionedNumber = null;
-    let phoneToProvision = selectedPhoneNumber;
+    const baseUrl = process.env.BASE_URL || process.env.WEBHOOK_BASE_URL;
 
-    if (!phoneToProvision) {
-      console.log('No phone selected, searching for available number...');
-      try {
-        // Search for available numbers (try local first, then toll-free)
-        const availableNumbers = await numberProvisioningService.searchAvailableNumbers({
-          country: 'US',
-          voiceEnabled: true,
-          limit: 1
-        });
-
-        if (availableNumbers && availableNumbers.length > 0) {
-          phoneToProvision = availableNumbers[0].phoneNumber;
-          console.log('Found available number:', phoneToProvision);
-        } else {
-          console.log('No local numbers available, trying toll-free...');
-          // Try toll-free as fallback
-          const twilioClient = numberProvisioningService.getClient();
-          const tollFreeNumbers = await twilioClient
-            .availablePhoneNumbers('US')
-            .tollFree.list({ voiceEnabled: true, limit: 1 });
-          
-          if (tollFreeNumbers && tollFreeNumbers.length > 0) {
-            phoneToProvision = tollFreeNumbers[0].phoneNumber;
-            console.log('Found toll-free number:', phoneToProvision);
-          }
-        }
-      } catch (searchError) {
-        console.error('Failed to search for numbers:', searchError);
-      }
-    }
-
-    // Provision the phone number if we have one
-    if (phoneToProvision) {
+    if (selectedPhoneNumber) {
       try {
         provisionedNumber = await numberProvisioningService.provisionNumber(
-          phoneToProvision,
-          'pending'
+          selectedPhoneNumber,
+          'onboarding',
+          baseUrl || undefined
         );
-        console.log('Successfully provisioned number:', provisionedNumber.phoneNumber);
-      } catch (provisionError) {
-        console.error('Failed to provision number:', provisionError);
-        // Continue without phone number - they can add one later
+        if (baseUrl && provisionedNumber?.phoneSid) {
+          await numberProvisioningService.updateWebhooks(provisionedNumber.phoneSid, baseUrl);
+        }
+        console.log('[onboarding] Provisioned selected number:', provisionedNumber?.phoneNumber);
+      } catch (err) {
+        console.error('[onboarding] Failed to provision selected number:', err?.message || err);
       }
     } else {
-      console.warn('No phone number available to provision');
+      try {
+        if (!baseUrl || !baseUrl.startsWith('http')) {
+          console.warn('[onboarding] BASE_URL or WEBHOOK_BASE_URL not set; provisioning may fail');
+        }
+        provisionedNumber = await numberProvisioningService.provisionForOnboarding({
+          baseUrl: baseUrl || undefined,
+          areaCode: req.body.areaCode
+        });
+        if (provisionedNumber) {
+          console.log('[onboarding] Auto-provisioned number:', provisionedNumber.phoneNumber);
+        } else {
+          console.warn('[onboarding] No Twilio numbers available (local or toll-free)');
+        }
+      } catch (err) {
+        console.error('[onboarding] Provisioning failed:', err?.message || err);
+      }
     }
 
     // Create the business
@@ -223,18 +209,6 @@ router.post('/create', async (req, res) => {
     });
 
     await business.save({ session });
-
-    // Update webhooks if phone was provisioned
-    if (provisionedNumber?.phoneSid) {
-      try {
-        await numberProvisioningService.updateWebhooks(provisionedNumber.phoneSid, {
-          voiceUrl: `${process.env.BASE_URL}/webhooks/twilio/voice`,
-          statusCallback: `${process.env.BASE_URL}/webhooks/twilio/status`
-        });
-      } catch (updateError) {
-        console.error('Failed to update webhook URLs:', updateError);
-      }
-    }
 
     // Create notification recipient for owner
     const notificationRecipient = new NotificationRecipient({
