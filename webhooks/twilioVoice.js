@@ -6,12 +6,13 @@ const VoiceResponse = twilio.twiml.VoiceResponse;
 const Business = require('../models/Business');
 const Call = require('../models/Call');
 const Lead = require('../models/Lead');
+const CallState = require('../models/CallState');
 const openaiService = require('../services/openaiService');
 const leadCaptureService = require('../services/leadCaptureService');
 const summaryService = require('../services/summaryService');
 const emailService = require('../services/emailService');
 
-// In-memory conversation store (in production, use Redis)
+// In-memory conversation cache (primary state is stored in Mongo via CallState)
 const conversations = new Map();
 
 /**
@@ -55,8 +56,8 @@ function generateGatherResponse(sayText, voice = VOICE) {
     input: 'speech',
     action: '/webhooks/twilio/gather',
     method: 'POST',
-    speechTimeout: 'auto',
-    timeout: 5,
+    speechTimeout: 3,  // Wait 3s after speech stops before processing
+    timeout: 10,       // Allow 10s for user to start speaking
     language: 'en-US'
   });
   gather.say({ voice }, sayText);
@@ -64,16 +65,23 @@ function generateGatherResponse(sayText, voice = VOICE) {
 }
 
 /**
- * Detect goodbye/end phrases
+ * Detect goodbye/end phrases with stage awareness
  */
-function isGoodbye(text) {
-  const goodbyePhrases = [
-    'goodbye', 'bye', 'thank you', 'thanks', "that's all", "that is all",
-    'nothing else', 'no thanks', 'no thank you', 'have a good day',
-    "i'm good", "i am good", 'all set', "that's it", 'done'
-  ];
-  const lower = text.toLowerCase();
-  return goodbyePhrases.some(phrase => lower.includes(phrase));
+function isGoodbye(text, currentStage) {
+  if (!text) return false;
+
+  const lower = text.toLowerCase().trim();
+  const dataStages = ['GREETING', 'GET_NAME', 'GET_PHONE', 'GET_REASON'];
+
+  // During data collection stages, only act on explicit goodbyes
+  if (dataStages.includes(currentStage)) {
+    const explicit = ['goodbye', 'bye bye', 'gotta go', 'talk later'];
+    return explicit.some(p => new RegExp(`\\b${p}\\b`, 'i').test(lower));
+  }
+
+  // After main data is collected, be more flexible
+  const flexible = ['goodbye', 'bye', 'thank you bye', "that's all", 'no thanks'];
+  return flexible.some(p => new RegExp(`\\b${p}\\b`, 'i').test(lower));
 }
 
 /**
@@ -95,26 +103,144 @@ function isNegative(text) {
 }
 
 /**
- * Extract phone number from speech
+ * Extract phone number from speech (more robust)
  */
 function extractPhoneNumber(speech) {
-  // Remove all non-digit characters
-  const cleaned = speech.replace(/\D/g, '');
+  console.log('Phone input:', speech);
   
-  // Handle different formats
-  if (cleaned.length === 10) {
-    return `+1${cleaned}`;
-  } else if (cleaned.length === 11 && cleaned.startsWith('1')) {
-    return `+${cleaned}`;
+  const refusals = [
+    "i don't have", 'i dont have', 'not sure',
+    "don't know", 'no phone'
+  ];
+  
+  const lower = speech.toLowerCase();
+  if (refusals.some(p => lower.includes(p))) return null;
+  
+  const digits = speech.replace(/\D/g, '');
+  
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits[0] === '1') return `+${digits}`;
+  if (digits.length >= 7) return `+1${digits.padEnd(10, '0')}`;
+  
+  return null;
+}
+
+/**
+ * CallState helpers - Mongo-backed conversation state
+ */
+async function getCallState(callSid) {
+  try {
+    let state = await CallState.findOne({ callSid });
+    if (!state) {
+      state = await CallState.create({
+        callSid,
+        stage: 'GREETING',
+        collectedData: {},
+        retryAttempts: {},
+        transcript: []
+      });
+    }
+    return state;
+  } catch (error) {
+    console.error('Error getting call state:', error);
+    throw error;
   }
-  
-  // Return cleaned digits if we have at least 7
-  if (cleaned.length >= 7) {
-    return cleaned;
+}
+
+async function updateCallState(callSid, updates) {
+  try {
+    return await CallState.findOneAndUpdate(
+      { callSid },
+      { ...updates, lastUpdated: new Date() },
+      { new: true, upsert: true }
+    );
+  } catch (error) {
+    console.error('Error updating call state:', error);
+    throw error;
   }
-  
-  // Return original if can't parse
-  return speech;
+}
+
+async function addToTranscript(callSid, speaker, message) {
+  try {
+    await CallState.findOneAndUpdate(
+      { callSid },
+      { $push: { transcript: `${speaker}: ${message}` } }
+    );
+  } catch (error) {
+    console.error('Error updating CallState transcript:', error);
+  }
+}
+
+/**
+ * Handle no-input scenarios with timeout tracking
+ */
+async function handleNoInput(callSid) {
+  try {
+    const state = await getCallState(callSid);
+    
+    // Track timeout count
+    const timeoutCount = (state.timeoutCount || 0) + 1;
+    
+    if (timeoutCount >= 2) {
+      // After 2 timeouts, move to next stage with "unclear"
+      console.log(`⚠ Max timeouts reached for ${callSid}, moving on`);
+      
+      return {
+        response: "I'm having trouble hearing you. Let me ask you something else.",
+        moveToNextStage: true,
+        storeAsUnclear: true
+      };
+    }
+    
+    // Update timeout count
+    await updateCallState(callSid, { timeoutCount });
+    
+    // Re-ask the SAME question they didn't answer
+    const currentQuestion = state.currentQuestion || "How can I help you today?";
+    
+    console.log(`Timeout ${timeoutCount}/2 for ${callSid}, re-asking: ${currentQuestion}`);
+    
+    return {
+      response: `I didn't hear anything. ${currentQuestion}`,
+      stage: state.stage, // Stay on same stage
+      keepAsking: true
+    };
+  } catch (error) {
+    console.error('Error handling no-input:', error);
+    return {
+      response: "I didn't catch that. How can I help you today?",
+      stage: 'GREETING'
+    };
+  }
+}
+
+/**
+ * Persist full transcript from CallState onto Call document
+ */
+async function saveTranscript(callSid) {
+  try {
+    const callState = await CallState.findOne({ callSid });
+    const call = await Call.findOne({ twilioCallSid: callSid });
+
+    if (callState && call) {
+      const transcriptArray = Array.isArray(callState.transcript) ? callState.transcript : [];
+      const fullTranscript = transcriptArray.join('\n');
+
+      call.fullTranscript = fullTranscript;
+      call.conversationLength = transcriptArray.length;
+      call.completedAt = new Date();
+
+      await call.save();
+      console.log(`✓ Saved transcript for ${callSid}: ${fullTranscript.length} chars`);
+      return true;
+    } else {
+      console.log(`⚠ Missing CallState or Call for ${callSid}`);
+      return false;
+    }
+  } catch (error) {
+    console.error('✗ Error saving transcript:', error);
+    return false;
+  }
 }
 
 /**
@@ -184,6 +310,91 @@ function extractName(speech) {
     .join(' ');
   
   return name.trim() || speech;
+}
+
+/**
+ * Validate input before advancing to next stage
+ * Returns { valid: boolean, reason: string }
+ */
+function isValidInput(input, stage) {
+  if (!input || input.trim().length === 0) {
+    return { valid: false, reason: 'empty' };
+  }
+  
+  const cleaned = input.trim().toLowerCase();
+  
+  switch(stage) {
+    case STAGES.GET_NAME:
+      // Name must be at least 2 characters, not filler words
+      const fillerWords = ['um', 'uh', 'hmm', 'hm', 'hold on', 'wait', 'hold', 'one second', 
+                           'what', 'huh', 'sorry', 'pardon', 'excuse me', 'let me think',
+                           'i dont know', "i don't know", 'not sure', 'maybe'];
+      if (fillerWords.some(f => cleaned === f || cleaned.startsWith(f + ' '))) {
+        return { valid: false, reason: 'filler' };
+      }
+      if (cleaned.length < 2) {
+        return { valid: false, reason: 'too_short' };
+      }
+      // Check if it looks like a question (not a name)
+      if (cleaned.includes('?') || cleaned.startsWith('what') || cleaned.startsWith('how')) {
+        return { valid: false, reason: 'question' };
+      }
+      return { valid: true, reason: null };
+      
+    case STAGES.GET_PHONE:
+      // Phone must have at least 7 digits
+      const digits = input.replace(/\D/g, '');
+      if (digits.length < 7) {
+        // Check if they said they don't have a phone
+        if (cleaned.includes("don't have") || cleaned.includes('dont have') || 
+            cleaned.includes('no phone') || cleaned.includes('not sure')) {
+          return { valid: false, reason: 'no_phone' };
+        }
+        return { valid: false, reason: 'invalid_phone' };
+      }
+      return { valid: true, reason: null };
+      
+    case STAGES.GET_REASON:
+      // Reason must be at least 5 characters or 2 words
+      const words = cleaned.split(/\s+/).filter(w => w.length > 0);
+      if (cleaned.length < 5 && words.length < 2) {
+        return { valid: false, reason: 'too_short' };
+      }
+      // Check for filler responses
+      const reasonFillers = ['yes', 'yeah', 'yep', 'no', 'nope', 'ok', 'okay', 'sure', 'um', 'uh'];
+      if (reasonFillers.includes(cleaned)) {
+        return { valid: false, reason: 'filler' };
+      }
+      return { valid: true, reason: null };
+      
+    default:
+      return { valid: cleaned.length > 0, reason: null };
+  }
+}
+
+/**
+ * Get re-prompt message when input is invalid
+ */
+function getRepromptMessage(stage, reason) {
+  switch(stage) {
+    case STAGES.GET_NAME:
+      if (reason === 'question') {
+        return "I'd be happy to help with that! But first, may I have your name?";
+      }
+      return "I didn't quite catch your name. Could you tell me your name?";
+      
+    case STAGES.GET_PHONE:
+      if (reason === 'no_phone') {
+        return "No problem! What's the reason for your call today?";
+      }
+      return "I didn't get that number. Could you repeat your phone number?";
+      
+    case STAGES.GET_REASON:
+      return "Could you tell me a bit more about why you're calling today?";
+      
+    default:
+      return "I didn't catch that. Could you please repeat?";
+  }
 }
 
 // ============================================
@@ -274,6 +485,18 @@ router.post('/voice', async (req, res) => {
     
     conversations.set(CallSid, conversation);
 
+    // Persist initial state to Mongo
+    await updateCallState(CallSid, {
+      stage: conversation.stage,
+      collectedData: {
+        name: conversation.collectedInfo.name,
+        phone: conversation.collectedInfo.phone,
+        reason: conversation.collectedInfo.reason
+      },
+      timeoutCount: conversation.noInputCount,
+      lowConfidenceAttempts: conversation.questionCount
+    });
+
     // Generate greeting (SCRIPTED - No OpenAI)
     const greeting = business.customGreeting 
       ? business.customGreeting 
@@ -285,17 +508,24 @@ router.post('/voice', async (req, res) => {
     console.log('=== STAGE: GREETING ===');
     console.log('Greeting:', fullGreeting);
 
-    // Add greeting to transcript
+    // Store current question for no-input handling
+    await updateCallState(CallSid, {
+      currentQuestion: followUp,
+      stage: STAGES.GET_NAME
+    });
+
+    // Add greeting to transcript (Call + CallState)
     await call.addTranscriptEntry('assistant', fullGreeting);
     conversation.history.push({ role: 'assistant', content: fullGreeting });
+    await addToTranscript(CallSid, 'assistant', fullGreeting);
 
     // Respond with greeting, then gather speech input
     const gather = twiml.gather({
       input: 'speech',
       action: '/webhooks/twilio/gather',
       method: 'POST',
-      speechTimeout: 'auto',
-      timeout: 5,
+      speechTimeout: 3,  // Wait 3s after speech stops before processing
+      timeout: 10,       // Allow 10s for user to start speaking
       language: 'en-US'
     });
     gather.say({ voice: VOICE }, fullGreeting);
@@ -328,6 +558,7 @@ router.post('/gather', async (req, res) => {
   try {
     const callSid = req.body.CallSid || '';
     const speechResult = req.body.SpeechResult || '';
+    const MIN_CONFIDENCE = 0.15; // Lowered from 0.3
     const confidence = parseFloat(req.body.Confidence) || 0;
 
     // Handle missing CallSid
@@ -338,18 +569,54 @@ router.post('/gather', async (req, res) => {
       return sendTwiML(res, twiml);
     }
 
-    const conversation = conversations.get(callSid);
+    let conversation = conversations.get(callSid);
     
     if (!conversation) {
-      console.error(`No conversation found for CallSid: ${callSid}`);
-      twiml.say({ voice: VOICE }, 'Sorry, there was an error with your call. Goodbye.');
-      twiml.hangup();
-      return sendTwiML(res, twiml);
+      console.warn(`No in-memory conversation for CallSid: ${callSid}. Attempting recovery from CallState.`);
+      const state = await CallState.findOne({ callSid });
+
+      if (!state) {
+        console.error(`No conversation or CallState found for CallSid: ${callSid}`);
+        twiml.say({ voice: VOICE }, 'Sorry, there was an error with your call. Goodbye.');
+        twiml.hangup();
+        return sendTwiML(res, twiml);
+      }
+
+      const call = await Call.findOne({ twilioCallSid: callSid }).populate('business');
+      if (!call || !call.business) {
+        console.error(`Unable to reconstruct conversation for CallSid: ${callSid} (missing Call/Business)`);
+        twiml.say({ voice: VOICE }, 'Sorry, there was an error with your call. Goodbye.');
+        twiml.hangup();
+        return sendTwiML(res, twiml);
+      }
+
+      const business = call.business;
+      conversation = {
+        businessId: business._id.toString(),
+        businessName: business.businessName,
+        callId: call._id.toString(),
+        stage: state.stage || STAGES.GET_NAME,
+        collectedInfo: {
+          name: state.collectedData?.name || null,
+          phone: state.collectedData?.phone || null,
+          reason: state.collectedData?.reason || null
+        },
+        history: [], // We could hydrate from state.transcript if needed
+        faqs: business.faqs || [],
+        services: business.services || [],
+        customInstructions: business.customInstructions || '',
+        isAfterHours: call.metadata?.isAfterHours || false,
+        noInputCount: state.timeoutCount || 0,
+        questionCount: state.lowConfidenceAttempts || 0
+      };
+
+      conversations.set(callSid, conversation);
     }
 
     // Handle empty speech input
     if (!speechResult || speechResult.trim() === '') {
       conversation.noInputCount = (conversation.noInputCount || 0) + 1;
+      await updateCallState(callSid, { timeoutCount: conversation.noInputCount });
       
       if (conversation.noInputCount >= 3) {
         return await endCall(callSid, twiml, res, "I'm having trouble hearing you. Thank you for calling. Goodbye!");
@@ -359,8 +626,8 @@ router.post('/gather', async (req, res) => {
         input: 'speech',
         action: '/webhooks/twilio/gather',
         method: 'POST',
-        speechTimeout: 'auto',
-        timeout: 5,
+        speechTimeout: 3,  // Wait 3s after speech stops before processing
+        timeout: 10,       // Allow 10s for user to start speaking
         language: 'en-US'
       });
       gather.say({ voice: VOICE }, "I didn't catch that. Could you please repeat?");
@@ -368,23 +635,42 @@ router.post('/gather', async (req, res) => {
       return sendTwiML(res, twiml);
     }
 
-    // Handle low confidence
-    if (confidence > 0 && confidence < 0.3) {
-      const gather = twiml.gather({
-        input: 'speech',
-        action: '/webhooks/twilio/gather',
-        method: 'POST',
-        speechTimeout: 'auto',
-        timeout: 5,
-        language: 'en-US'
-      });
-      gather.say({ voice: VOICE }, "Sorry, I had trouble understanding. Could you say that again?");
-      twiml.redirect({ method: 'POST' }, '/webhooks/twilio/no-input?CallSid=' + callSid);
-      return sendTwiML(res, twiml);
+    console.log(`Speech confidence: ${confidence} for: "${speechResult}"`);
+
+    // Handle low confidence with CallState-backed attempts
+    if (confidence < MIN_CONFIDENCE) {
+      console.log(`⚠ Low confidence (${confidence}): "${speechResult}"`);
+
+      const state = await getCallState(callSid);
+      state.lowConfidenceAttempts = (state.lowConfidenceAttempts || 0) + 1;
+
+      if (state.lowConfidenceAttempts >= 2) {
+        // After 2 attempts, accept it anyway
+        console.log('✓ Accepting low confidence input after 2 attempts');
+        state.lowConfidenceAttempts = 0;
+        await state.save();
+        await updateCallState(callSid, { lowConfidenceAttempts: 0 });
+      } else {
+        await state.save();
+        await updateCallState(callSid, { lowConfidenceAttempts: state.lowConfidenceAttempts });
+
+        const gather = twiml.gather({
+          input: 'speech',
+          action: '/webhooks/twilio/gather',
+          method: 'POST',
+          speechTimeout: 3,  // Wait 3s after speech stops before processing
+          timeout: 10,       // Allow 10s for user to start speaking
+          language: 'en-US'
+        });
+        gather.say({ voice: VOICE }, "Sorry, I had trouble understanding. Could you say that again?");
+        twiml.redirect({ method: 'POST' }, '/webhooks/twilio/no-input?CallSid=' + callSid);
+        return sendTwiML(res, twiml);
+      }
     }
 
     // Reset no-input count
     conversation.noInputCount = 0;
+    await updateCallState(callSid, { timeoutCount: 0 });
 
     // Get call document
     const call = await Call.findById(conversation.callId);
@@ -395,12 +681,13 @@ router.post('/gather', async (req, res) => {
       return sendTwiML(res, twiml);
     }
 
-    // Add user message to transcript
+    // Add user message to transcript (Call + CallState)
     await call.addTranscriptEntry('user', speechResult);
     conversation.history.push({ role: 'user', content: speechResult });
+    await addToTranscript(callSid, 'user', speechResult);
 
-    // Check for goodbye at any stage
-    if (isGoodbye(speechResult)) {
+    // Check for goodbye at any stage (stage-aware)
+    if (isGoodbye(speechResult, conversation.stage)) {
       return await endCall(callSid, twiml, res, `Thank you for calling ${conversation.businessName}. We'll be in touch soon. Have a great day!`);
     }
 
@@ -419,53 +706,126 @@ router.post('/gather', async (req, res) => {
       // ----------------------------------------
       // STAGE: GET_NAME (Scripted - No OpenAI)
       // ----------------------------------------
-      case STAGES.GET_NAME:
-        conversation.collectedInfo.name = extractName(speechResult);
-        response = `Thanks ${conversation.collectedInfo.name}! What's the best phone number to reach you?`;
-        nextStage = STAGES.GET_PHONE;
-        console.log('Collected name:', conversation.collectedInfo.name);
+      case STAGES.GET_NAME: {
+        const nameValidation = isValidInput(speechResult, STAGES.GET_NAME);
+        
+        if (!nameValidation.valid) {
+          console.log('Invalid name input:', speechResult, 'Reason:', nameValidation.reason);
+          
+          // If they asked a question, note it but still ask for name
+          if (nameValidation.reason === 'question') {
+            response = getRepromptMessage(STAGES.GET_NAME, 'question');
+          } else {
+            response = getRepromptMessage(STAGES.GET_NAME, nameValidation.reason);
+          }
+          nextStage = STAGES.GET_NAME; // Stay on same stage
+        } else {
+          conversation.collectedInfo.name = extractName(speechResult);
+          const phoneQuestion = "What's the best phone number to reach you?";
+          response = `Thanks ${conversation.collectedInfo.name}! ${phoneQuestion}`;
+          nextStage = STAGES.GET_PHONE;
+          console.log('Collected name:', conversation.collectedInfo.name);
+          
+          // Store current question before asking
+          await updateCallState(callSid, {
+            stage: STAGES.GET_PHONE,
+            currentQuestion: phoneQuestion,
+            collectedData: {
+              name: conversation.collectedInfo.name,
+              phone: conversation.collectedInfo.phone,
+              reason: conversation.collectedInfo.reason
+            }
+          });
+        }
         break;
+      }
 
       // ----------------------------------------
       // STAGE: GET_PHONE (Scripted - No OpenAI)
       // ----------------------------------------
-      case STAGES.GET_PHONE:
-        conversation.collectedInfo.phone = extractPhoneNumber(speechResult);
-        response = `Perfect. What's the reason for your call today?`;
-        nextStage = STAGES.GET_REASON;
-        console.log('Collected phone:', conversation.collectedInfo.phone);
+      case STAGES.GET_PHONE: {
+        const phoneValidation = isValidInput(speechResult, STAGES.GET_PHONE);
+        
+        if (!phoneValidation.valid) {
+          console.log('Invalid phone input:', speechResult, 'Reason:', phoneValidation.reason);
+          
+          // If they don't have a phone, skip to reason
+          if (phoneValidation.reason === 'no_phone') {
+            response = getRepromptMessage(STAGES.GET_PHONE, 'no_phone');
+            nextStage = STAGES.GET_REASON;
+          } else {
+            response = getRepromptMessage(STAGES.GET_PHONE, phoneValidation.reason);
+            nextStage = STAGES.GET_PHONE; // Stay on same stage
+          }
+        } else {
+          const extractedPhone = extractPhoneNumber(speechResult);
+          conversation.collectedInfo.phone = extractedPhone || 'Not provided';
+          const reasonQuestion = "What's the reason for your call today?";
+          response = `Perfect. ${reasonQuestion}`;
+          nextStage = STAGES.GET_REASON;
+          console.log('Collected phone:', conversation.collectedInfo.phone);
+          
+          // Store current question before asking
+          await updateCallState(callSid, {
+            stage: STAGES.GET_REASON,
+            currentQuestion: reasonQuestion,
+            collectedData: {
+              name: conversation.collectedInfo.name,
+              phone: conversation.collectedInfo.phone,
+              reason: conversation.collectedInfo.reason
+            }
+          });
+        }
         break;
+      }
 
       // ----------------------------------------
       // STAGE: GET_REASON (Check FAQs first, then OpenAI if needed)
       // ----------------------------------------
-      case STAGES.GET_REASON:
-        conversation.collectedInfo.reason = speechResult;
-        console.log('Collected reason:', speechResult);
+      case STAGES.GET_REASON: {
+        const reasonValidation = isValidInput(speechResult, STAGES.GET_REASON);
         
-        // Try to answer from FAQs first (no OpenAI)
-        const faqAnswer = checkFAQs(speechResult, conversation.faqs);
-        
-        if (faqAnswer) {
-          console.log('=== FAQ MATCH (No OpenAI) ===');
-          response = `${faqAnswer} Is there anything else I can help you with?`;
-          nextStage = STAGES.FOLLOW_UP;
+        if (!reasonValidation.valid) {
+          console.log('Invalid reason input:', speechResult, 'Reason:', reasonValidation.reason);
+          response = getRepromptMessage(STAGES.GET_REASON, reasonValidation.reason);
+          nextStage = STAGES.GET_REASON; // Stay on same stage
         } else {
-          // Need OpenAI for this question
-          console.log('=== USING OPENAI ===');
-          const aiResponse = await getAIResponse(speechResult, conversation);
-          response = `${aiResponse} Is there anything else I can help you with?`;
-          nextStage = STAGES.FOLLOW_UP;
-          conversation.questionCount++;
+          conversation.collectedInfo.reason = speechResult;
+          console.log('Collected reason:', speechResult);
+          await updateCallState(callSid, {
+            stage: STAGES.GET_REASON,
+            collectedData: {
+              name: conversation.collectedInfo.name,
+              phone: conversation.collectedInfo.phone,
+              reason: conversation.collectedInfo.reason
+            }
+          });
+          
+          // Try to answer from FAQs first (no OpenAI)
+          const faqAnswer = checkFAQs(speechResult, conversation.faqs);
+          
+          if (faqAnswer) {
+            console.log('=== FAQ MATCH (No OpenAI) ===');
+            response = `${faqAnswer} Is there anything else I can help you with?`;
+            nextStage = STAGES.FOLLOW_UP;
+          } else {
+            // Need OpenAI for this question
+            console.log('=== USING OPENAI ===');
+            const aiResponse = await getAIResponse(speechResult, conversation);
+            response = `${aiResponse} Is there anything else I can help you with?`;
+            nextStage = STAGES.FOLLOW_UP;
+            conversation.questionCount++;
+          }
         }
         break;
+      }
 
       // ----------------------------------------
       // STAGE: FOLLOW_UP (Check for more questions or end)
       // ----------------------------------------
-      case STAGES.FOLLOW_UP:
+      case STAGES.FOLLOW_UP: {
         // Check if they're done
-        if (isNegative(speechResult) || isGoodbye(speechResult)) {
+        if (isNegative(speechResult) || isGoodbye(speechResult, conversation.stage)) {
           const name = conversation.collectedInfo.name || 'you';
           const phone = conversation.collectedInfo.phone;
           const closingMsg = phone 
@@ -493,6 +853,7 @@ router.post('/gather', async (req, res) => {
         
         nextStage = STAGES.FOLLOW_UP;
         break;
+      }
 
       default:
         response = "How can I help you?";
@@ -514,8 +875,8 @@ router.post('/gather', async (req, res) => {
       input: 'speech',
       action: '/webhooks/twilio/gather',
       method: 'POST',
-      speechTimeout: 'auto',
-      timeout: 5,
+      speechTimeout: 3,  // Wait 3s after speech stops before processing
+      timeout: 10,       // Allow 10s for user to start speaking
       language: 'en-US'
     });
     gather.say({ voice: VOICE }, response);
@@ -531,8 +892,8 @@ router.post('/gather', async (req, res) => {
       input: 'speech',
       action: '/webhooks/twilio/gather',
       method: 'POST',
-      speechTimeout: 'auto',
-      timeout: 5,
+      speechTimeout: 3,  // Wait 3s after speech stops before processing
+      timeout: 10,       // Allow 10s for user to start speaking
       language: 'en-US'
     });
     gather.say({ voice: VOICE }, "I'm sorry, I had trouble with that. Could you please repeat?");
@@ -591,6 +952,11 @@ async function handleCallComplete(call, business) {
     console.log('Call ID:', call._id);
     console.log('CallSid:', callSid);
     console.log('Business:', business.businessName);
+
+    // Persist transcript for this call (best-effort)
+    if (callSid && callSid !== 'unknown') {
+      await saveTranscript(callSid);
+    }
 
     // Find the lead associated with this call
     lead = await Lead.findOne({ call: call._id }).sort({ createdAt: -1 });
@@ -801,6 +1167,8 @@ async function endCall(callSid, twiml, res, message) {
   
   twiml.say({ voice: VOICE }, message);
   twiml.hangup();
+  // Also record final assistant message in CallState transcript
+  await addToTranscript(callSid, 'assistant', message);
   return sendTwiML(res, twiml);
 }
 
@@ -816,42 +1184,99 @@ router.post('/no-input', async (req, res) => {
   const conversation = conversations.get(CallSid);
   
   if (!conversation) {
-    twiml.say({ voice: VOICE }, 'Goodbye.');
+    // Try to recover from CallState
+    const state = await CallState.findOne({ callSid: CallSid });
+    if (!state) {
+      twiml.say({ voice: VOICE }, 'Goodbye.');
+      twiml.hangup();
+      return sendTwiML(res, twiml);
+    }
+    // If we have state but no conversation, end call gracefully
+    twiml.say({ voice: VOICE }, 'Thank you for calling. Goodbye.');
     twiml.hangup();
     return sendTwiML(res, twiml);
   }
 
-  conversation.noInputCount = (conversation.noInputCount || 0) + 1;
+  // Use handleNoInput to get response strategy
+  const result = await handleNoInput(CallSid);
 
-  if (conversation.noInputCount >= 3) {
-    return await endCall(CallSid, twiml, res, "I haven't heard from you. Thank you for calling. Goodbye!");
+  if (result.moveToNextStage) {
+    // After 2 timeouts, move to next stage with "unclear"
+    console.log(`Moving to next stage after max timeouts for ${CallSid}`);
+    
+    // Determine next stage based on current stage
+    let nextStage = conversation.stage;
+    let unclearValue = 'unclear';
+    
+    switch (conversation.stage) {
+      case STAGES.GET_NAME:
+        nextStage = STAGES.GET_PHONE;
+        conversation.collectedInfo.name = unclearValue;
+        break;
+      case STAGES.GET_PHONE:
+        nextStage = STAGES.GET_REASON;
+        conversation.collectedInfo.phone = unclearValue;
+        break;
+      case STAGES.GET_REASON:
+        nextStage = STAGES.FOLLOW_UP;
+        conversation.collectedInfo.reason = unclearValue;
+        break;
+      default:
+        // If already past data collection, end call
+        return await endCall(CallSid, twiml, res, "I haven't heard from you. Thank you for calling. Goodbye!");
+    }
+    
+    conversation.stage = nextStage;
+    await updateCallState(CallSid, {
+      stage: nextStage,
+      timeoutCount: 0, // Reset timeout count
+      collectedData: {
+        name: conversation.collectedInfo.name,
+        phone: conversation.collectedInfo.phone,
+        reason: conversation.collectedInfo.reason
+      }
+    });
+    
+    // Ask next question
+    let nextQuestion = '';
+    switch (nextStage) {
+      case STAGES.GET_PHONE:
+        nextQuestion = "What's the best phone number to reach you?";
+        await updateCallState(CallSid, { currentQuestion: nextQuestion });
+        break;
+      case STAGES.GET_REASON:
+        nextQuestion = "What's the reason for your call today?";
+        await updateCallState(CallSid, { currentQuestion: nextQuestion });
+        break;
+      case STAGES.FOLLOW_UP:
+        nextQuestion = "Is there anything else I can help you with?";
+        await updateCallState(CallSid, { currentQuestion: nextQuestion });
+        break;
+    }
+    
+    const gather = twiml.gather({
+      input: 'speech',
+      action: '/webhooks/twilio/gather',
+      method: 'POST',
+      speechTimeout: 3,
+      timeout: 10,
+      language: 'en-US'
+    });
+    gather.say({ voice: VOICE }, `${result.response} ${nextQuestion}`);
+    twiml.redirect({ method: 'POST' }, '/webhooks/twilio/no-input?CallSid=' + CallSid);
+    return sendTwiML(res, twiml);
   }
 
-  // Stage-appropriate prompt
-  let prompt = "Are you still there?";
-  switch (conversation.stage) {
-    case STAGES.GET_NAME:
-      prompt = "Are you still there? May I have your name?";
-      break;
-    case STAGES.GET_PHONE:
-      prompt = "Are you still there? What's the best number to reach you?";
-      break;
-    case STAGES.GET_REASON:
-      prompt = "Are you still there? How can I help you today?";
-      break;
-    default:
-      prompt = "Are you still there? Is there anything else I can help you with?";
-  }
-
+  // Re-ask the same question
   const gather = twiml.gather({
     input: 'speech',
     action: '/webhooks/twilio/gather',
     method: 'POST',
-    speechTimeout: 'auto',
-    timeout: 5,
+    speechTimeout: 3,  // Wait 3s after speech stops before processing
+    timeout: 10,       // Allow 10s for user to start speaking
     language: 'en-US'
   });
-  gather.say({ voice: VOICE }, prompt);
+  gather.say({ voice: VOICE }, result.response);
   twiml.redirect({ method: 'POST' }, '/webhooks/twilio/no-input?CallSid=' + CallSid);
 
   return sendTwiML(res, twiml);
@@ -869,6 +1294,16 @@ router.post('/status', async (req, res) => {
     const call = await Call.findOne({ twilioCallSid: CallSid });
     
     if (call) {
+      const wasAlreadyCompleted = call.status === 'completed';
+
+      // If we've already fully completed this call, skip duplicate processing.
+      // This prevents double stats + duplicate emails when both endCall() and
+      // the /status webhook run the completion logic.
+      if (wasAlreadyCompleted && ['completed', 'failed', 'busy', 'no-answer', 'cancelled'].includes(CallStatus)) {
+        console.log(`Call ${CallSid} already completed - skipping duplicate status completion logic`);
+        return res.sendStatus(200);
+      }
+
       call.status = CallStatus;
       
       if (['completed', 'failed', 'busy', 'no-answer', 'cancelled'].includes(CallStatus)) {

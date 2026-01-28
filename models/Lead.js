@@ -91,6 +91,8 @@ const leadSchema = new mongoose.Schema({
   },
   callSid: {
     type: String,
+    required: true,
+    unique: true,
     index: true
   },
   reasonForCalling: {

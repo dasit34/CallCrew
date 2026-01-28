@@ -77,6 +77,14 @@ const callSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  fullTranscript: {
+    type: String,
+    default: ''
+  },
+  conversationLength: {
+    type: Number,
+    default: 0
+  },
   
   // Caller Intent & Sentiment
   callerIntent: {

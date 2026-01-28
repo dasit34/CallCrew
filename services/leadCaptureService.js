@@ -76,7 +76,7 @@ class LeadCaptureService {
   }
 
   /**
-   * Create a new lead
+   * Create a new lead (atomic per callSid to avoid duplicates)
    * @param {Object} options - Lead creation options
    */
   async createNewLead(options) {
@@ -107,8 +107,19 @@ class LeadCaptureService {
       metadata: call?.metadata || {}
     };
 
-    const lead = new Lead(leadData);
-    await lead.save();
+    const lead = await Lead.findOneAndUpdate(
+      { callSid: leadData.callSid },
+      {
+        $setOnInsert: leadData
+      },
+      {
+        upsert: true,
+        new: true,
+        setDefaultsOnInsert: true
+      }
+    );
+
+    console.log(`✓ Lead captured/updated: ${lead._id}`);
 
     // Link lead to call
     if (call) {
