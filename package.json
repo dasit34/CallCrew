@@ -9,7 +9,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "seed": "node scripts/seedIndustries.js"
+    "seed": "node scripts/seedIndustries.js",
+    "build:frontend": "cd ../callcrew-dashboard && npm ci && npm run build"
   },
   "keywords": [
     "twilio",

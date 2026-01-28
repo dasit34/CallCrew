@@ -1,8 +1,13 @@
 require('dotenv').config();
 const express = require('express');
+const path = require('path');
+const fs = require('fs');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const connectDatabase = require('./config/database');
+
+const FRONTEND_OUT = path.join(__dirname, '..', 'callcrew-dashboard', 'out');
+const HAS_FRONTEND = fs.existsSync(FRONTEND_OUT);
 
 // Import routes
 const onboardingRoutes = require('./routes/onboarding');
@@ -54,26 +59,32 @@ app.use('/api/admin', adminRoutes);
 // Twilio Webhooks
 app.use('/webhooks/twilio', twilioVoiceWebhook);
 
-// Root endpoint
-app.get('/', (req, res) => {
-  res.json({
-    name: 'CallCrew Backend API',
-    version: '1.0.0',
-    description: 'AI Phone Receptionist System',
-    endpoints: {
-      health: '/health',
-      api: {
-        onboarding: '/api/onboarding',
-        calls: '/api/calls',
-        admin: '/api/admin'
-      },
-      webhooks: {
-        twilioVoice: '/webhooks/twilio/voice',
-        twilioStatus: '/webhooks/twilio/status'
-      }
-    }
+// Frontend: serve static Next.js export (landing, onboarding, dashboard) and SPA fallback
+if (HAS_FRONTEND) {
+  app.use(
+    express.static(FRONTEND_OUT, {
+      extensions: ['html'],
+      fallthrough: true,
+      index: 'index.html',
+    })
+  );
+  app.get('*', (req, res, next) => {
+    if (req.method !== 'GET') return next();
+    if (req.path.startsWith('/api') || req.path.startsWith('/webhooks') || req.path === '/health')
+      return next();
+    res.sendFile(path.join(FRONTEND_OUT, 'index.html'));
   });
-});
+  console.log('✅ Frontend build served from', FRONTEND_OUT);
+} else {
+  app.get('/', (req, res) => {
+    res.json({
+      name: 'CallCrew Backend API',
+      version: '1.0.0',
+      description: 'AI Phone Receptionist System',
+      endpoints: { health: '/health', api: '/api', webhooks: '/webhooks/twilio' },
+    });
+  });
+}
 
 // 404 handler
 app.use((req, res) => {
