@@ -4,7 +4,7 @@ nixPkgs = ["nodejs", "npm"]
 [phases.build]
 cmds = [
   "cd callcrew-backend && npm ci",
-  "cd ../callcrew-dashboard && npm ci && npm run build"
+  "cd callcrew-dashboard && npm ci && npm run build"
 ]
 
 [start]
