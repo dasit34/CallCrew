@@ -18,11 +18,13 @@ const twilioVoiceWebhook = require('./webhooks/twilioVoice');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
+// Middleware: CORS for frontend at https://www.callcrew.ai only
+const allowedOrigin = process.env.CORS_ORIGIN || 'https://www.callcrew.ai';
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || '*',
+  origin: allowedOrigin,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
 }));
 
 // Body parser middleware
