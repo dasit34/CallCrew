@@ -1,7 +1,12 @@
 {
-  "name": "callcrew-mvp",
+  "name": "callcrew-root",
   "private": true,
+  "engines": {
+    "node": ">=20.9.0"
+  },
   "scripts": {
-    "start": "cd callcrew-backend && node server.js"
+    "build": "npm --prefix callcrew-dashboard ci && npm --prefix callcrew-dashboard run build",
+    "start": "npm --prefix callcrew-dashboard run start",
+    "dev": "npm --prefix callcrew-dashboard run dev"
   }
 }
