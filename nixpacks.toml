@@ -1,15 +1,11 @@
 [phases.setup]
 nixPkgs = ["nodejs", "npm"]
 
-[phases.install]
-cmds = ["npm cache clean --force"]
-
 [phases.build]
 cmds = [
-  "cd callcrew-backend && rm -rf node_modules/.cache && npm install",
-  "cd ../callcrew-dashboard && rm -rf node_modules/.cache && npm install",
-  "cd ../callcrew-dashboard && npm run build"
+  "cd callcrew-backend && npm ci",
+  "cd ../callcrew-dashboard && npm ci && npm run build"
 ]
 
 [start]
-cmd = "NODE_ENV=development node server.js"
+cmd = "cd callcrew-backend && node server.js"

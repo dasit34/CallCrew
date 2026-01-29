@@ -2,7 +2,7 @@
   "name": "callcrew-mvp",
   "private": true,
   "scripts": {
-    "build": "cd callcrew-backend && rm -rf node_modules/.cache && npm install && cd ../callcrew-dashboard && rm -rf node_modules/.cache && npm ci && npm run build",
-    "start": "node server.js"
+    "build": "cd callcrew-backend && npm ci && cd ../callcrew-dashboard && npm ci && npm run build",
+    "start": "cd callcrew-backend && node server.js"
   }
 }
