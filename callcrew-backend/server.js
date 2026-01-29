@@ -76,6 +76,7 @@ if (HAS_FRONTEND) {
   });
   console.log('✅ Frontend build served from', FRONTEND_OUT);
 } else {
+  console.log('⚠️ Frontend not served: build not found at', FRONTEND_OUT);
   app.get('/', (req, res) => {
     res.json({
       name: 'CallCrew Backend API',

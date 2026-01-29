@@ -1,7 +1,0 @@
-node_modules
-**/node_modules
-.cache
-.git
-npm-debug.log
-dist
-build
