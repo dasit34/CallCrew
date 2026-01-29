@@ -1,0 +1,60 @@
+@import "tailwindcss";
+
+:root {
+  --background: 255 255 255;
+  --foreground: 23 23 23;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: rgb(var(--background));
+  color: rgb(var(--foreground));
+  font-feature-settings: "rlig" 1, "calt" 1;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Clean scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d4d4d4;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #a3a3a3;
+}
+
+/* Focus states */
+*:focus-visible {
+  outline: 2px solid #171717;
+  outline-offset: 2px;
+}
+
+/* Selection */
+::selection {
+  background: #171717;
+  color: white;
+}
+
+/* Smooth animations */
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+}
