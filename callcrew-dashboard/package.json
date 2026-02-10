@@ -1,4 +1,5 @@
 {
+  "_comment": "Railway never uses the 'start' script; it uses startCommand in railway.json (npm run start:railway). 'start' is for local use only.",
   "name": "callcrew-dashboard",
   "version": "0.1.0",
   "private": true,
@@ -8,7 +9,9 @@
   "scripts": {
     "dev": "next dev -p 3001",
     "build": "next build",
-    "start": "next start -p $PORT"
+    "build:railway": "rm -rf node_modules/.cache .next out && next build",
+    "start": "next start -p $PORT",
+    "start:railway": "serve -s out -l $PORT"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.11",
@@ -34,6 +37,7 @@
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "recharts": "^3.7.0",
+    "serve": "^14.2.4",
     "tailwind-merge": "^3.4.0"
   },
   "devDependencies": {
