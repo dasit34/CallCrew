@@ -14,6 +14,7 @@ import {
 } from "@/components/landing";
 import { WhoThisIsFor } from "@/components/landing/WhoThisIsFor";
 import { ProblemSolution } from "@/components/landing/ProblemSolution";
+import { RealWorldSchedules } from "@/components/landing/RealWorldSchedules";
 import { Testimonials } from "@/components/landing/Testimonials";
 import { PricingTeaser } from "@/components/landing/PricingTeaser";
 
@@ -23,6 +24,7 @@ export default function HomePage() {
       <Navbar />
       <Hero />
       <WhoThisIsFor />
+      <RealWorldSchedules />
       <ProblemSolution />
       <WhatItDoes />
       <OnOffControl />

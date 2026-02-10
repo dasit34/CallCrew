@@ -145,13 +145,13 @@ export function Hero() {
 
           {/* Subheadline */}
           <p className="text-lg sm:text-xl text-slate-600 leading-relaxed mb-8 max-w-2xl">
-            CallCrew is your AI receptionist that answers business calls, captures leads, and sends you instant
-            summaries — even when you are busy, after hours, or off the clock.
+            CallCrew is your phone receptionist and executive assistant in one — answering calls, capturing leads,
+            booking follow-ups, and sending you simple summaries while you stay focused on customers, meetings, or your next session.
           </p>
 
           {/* Supporting line */}
           <p className="text-sm sm:text-base text-slate-500 mb-6 max-w-2xl">
-            Built for small businesses, service providers, and solo operators who can&apos;t afford to miss opportunities.
+            Built for small businesses, busy assistants, and solo professionals who run their day by the phone.
           </p>
 
           {/* CTAs */}
@@ -160,7 +160,7 @@ export function Hero() {
               href="/onboarding"
               className="inline-flex items-center justify-center gap-2 px-6 py-3.5 text-base font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors shadow-sm"
             >
-              Get Your AI Receptionist
+              Start capturing every call
               <ArrowRight className="w-4 h-4" />
             </Link>
             <a
@@ -175,15 +175,15 @@ export function Hero() {
           <ul className="flex flex-col sm:flex-row gap-2 sm:gap-6 mb-6 text-sm text-slate-600">
             <li className="flex items-center gap-2">
               <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
-              <span>Answers calls when you cannot</span>
+              <span>Answers calls when you are on a job, in a meeting, or off the clock</span>
             </li>
             <li className="flex items-center gap-2">
               <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
-              <span>Captures caller info and intent</span>
+              <span>Captures caller details, booking needs, and next steps</span>
             </li>
             <li className="flex items-center gap-2">
               <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
-              <span>Sends summaries by text or email instantly</span>
+              <span>Sends a clear summary so you or your assistant can follow up fast</span>
             </li>
           </ul>
 
@@ -466,19 +466,19 @@ const steps = [
   {
     number: "1",
     title: "Forward your calls",
-    description: "Set up call forwarding from your business line to CallCrew. Takes about 2 minutes.",
+    description: "Turn on call forwarding from your existing business number to CallCrew. Takes about 2 minutes.",
     color: "bg-blue-600",
   },
   {
     number: "2",
     title: "Assistant answers",
-    description: "CallCrew greets callers, asks your questions, and captures their info.",
+    description: "CallCrew greets callers, answers common questions, and captures what they need.",
     color: "bg-emerald-500",
   },
   {
     number: "3",
-    title: "You get the summary",
-    description: "Within seconds, you receive a text or email with everything from the call.",
+    title: "You get the summary and next steps",
+    description: "Within seconds, you or your assistant receive a simple summary with details, booking info, and follow-ups.",
     color: "bg-violet-500",
   },
 ];
