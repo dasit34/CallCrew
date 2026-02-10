@@ -9,9 +9,9 @@
   "scripts": {
     "dev": "next dev -p 3001",
     "build": "next build",
-    "build:railway": "rm -rf node_modules/.cache .next out && next build",
+    "build:railway": "next build",
     "start": "next start -p $PORT",
-    "start:railway": "serve -s out -l $PORT"
+    "start:railway": "next start -p $PORT"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.11",
