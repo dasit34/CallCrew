@@ -13,6 +13,9 @@ import {
   Footer,
 } from "@/components/landing";
 import { WhoThisIsFor } from "@/components/landing/WhoThisIsFor";
+import { ProblemSolution } from "@/components/landing/ProblemSolution";
+import { Testimonials } from "@/components/landing/Testimonials";
+import { PricingTeaser } from "@/components/landing/PricingTeaser";
 
 export default function HomePage() {
   return (
@@ -20,10 +23,13 @@ export default function HomePage() {
       <Navbar />
       <Hero />
       <WhoThisIsFor />
+      <ProblemSolution />
       <WhatItDoes />
       <OnOffControl />
       <ReplaceLiveAssistants />
       <IndustryAssistants />
+      <Testimonials />
+      <PricingTeaser />
       <HowItWorks />
       <FAQ />
       <CallDemoCTA />

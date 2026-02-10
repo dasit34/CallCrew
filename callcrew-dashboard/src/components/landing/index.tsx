@@ -187,6 +187,12 @@ export function Hero() {
             </li>
           </ul>
 
+          {/* Social proof / trust */}
+          <p className="text-xs sm:text-sm text-slate-500">
+            Trusted by small service businesses, clinics, and local professionals who are tired of losing work to missed
+            calls.
+          </p>
+
           {/* Micro-line */}
           <p className="text-sm text-slate-500 flex items-center gap-2">
             <CheckCircle className="w-4 h-4 text-emerald-500" />
@@ -202,38 +208,38 @@ export function Hero() {
 const features = [
   {
     icon: Phone,
-    title: "Answers calls 24/7",
-    description: "Or only during the hours you set. You decide when CallCrew picks up.",
+    title: "Capture every call",
+    description: "Stay available when customers dial — even when you are on a job, in a meeting, or closed for the day.",
     color: "bg-blue-500",
   },
   {
     icon: UserCheck,
-    title: "Captures lead info",
-    description: "Collects name, number, and the reason they are calling — every time.",
+    title: "Turn callers into leads",
+    description: "Collects name, number, and what they need so you can quickly call back the right people.",
     color: "bg-emerald-500",
   },
   {
     icon: MessageSquare,
-    title: "Qualifies callers",
-    description: "Asks your screening questions so you know who to call back first.",
+    title: "Know who to call first",
+    description: "Asks your screening questions so you know which calls are urgent and which can wait.",
     color: "bg-violet-500",
   },
   {
     icon: Calendar,
-    title: "Collects appointment requests",
-    description: "Takes down preferred times and services so you can confirm later.",
+    title: "Book more appointments",
+    description: "Takes down times and services so you can confirm bookings instead of playing phone tag.",
     color: "bg-amber-500",
   },
   {
     icon: PhoneForwarded,
-    title: "Routes urgent calls",
-    description: "Can transfer emergencies or VIP callers directly to your cell.",
+    title: "Protect urgent calls",
+    description: "Can route emergencies or VIP callers directly to your cell so you never miss critical issues.",
     color: "bg-rose-500",
   },
   {
     icon: Mail,
-    title: "Sends summaries",
-    description: "Get a text or email after each call with everything discussed.",
+    title: "Get clear call summaries",
+    description: "Receive a simple summary by text or email after each call so you always know what happened.",
     color: "bg-cyan-500",
   },
 ];
@@ -377,37 +383,37 @@ const industries = [
   {
     icon: Wrench,
     title: "Contractors",
-    description: "Capture job requests while you are on site.",
+    description: "Capture job requests while you are on site so you do not miss new work.",
     color: "bg-orange-500",
   },
   {
     icon: Thermometer,
     title: "HVAC & Plumbing",
-    description: "Route emergency calls, collect service requests.",
+    description: "Route emergency calls and collect service requests while your team is in the field.",
     color: "bg-red-500",
   },
   {
     icon: Stethoscope,
     title: "Clinics",
-    description: "Take appointment requests after hours.",
+    description: "Take appointment requests after hours so staff can focus on patients in front of them.",
     color: "bg-teal-500",
   },
   {
     icon: Scissors,
     title: "Salons & Spas",
-    description: "Book while you are with a client.",
+    description: "Book while you are with a client instead of letting calls go to voicemail.",
     color: "bg-pink-500",
   },
   {
     icon: Home,
     title: "Real Estate",
-    description: "Capture buyer leads when you are showing a home.",
+    description: "Capture buyer and seller leads when you are showing a home.",
     color: "bg-blue-500",
   },
   {
     icon: Scale,
     title: "Legal Intake",
-    description: "Screen potential clients with qualifying questions.",
+    description: "Screen potential clients with qualifying questions, even when you are in court.",
     color: "bg-slate-600",
   },
 ];
@@ -418,10 +424,10 @@ export function IndustryAssistants() {
       <div className="max-w-6xl mx-auto px-4 sm:px-6">
         <div className="text-center mb-12">
           <h2 className="text-3xl sm:text-4xl font-bold text-slate-900 mb-4">
-            Trained for your type of business.
+            Fits the way your business runs.
           </h2>
           <p className="text-lg text-slate-600 max-w-2xl mx-auto">
-            Customized to your services, hours, and rules.
+            CallCrew adapts to your services, hours, and rules so callers get a professional, consistent experience.
           </p>
         </div>
 
@@ -512,28 +518,34 @@ export function HowItWorks() {
 // ============ FAQ ============
 const faqs = [
   {
-    question: "How long does setup take?",
-    answer: "Most businesses are live in under 10 minutes. We help you configure your greeting, screening questions, and notification preferences. Then you just forward your calls.",
+    question: "How is this different from voicemail?",
+    answer:
+      "Voicemail waits for callers to leave a message. Many never do. CallCrew actually answers the call, has a short conversation, and sends you a clear summary with the caller's details and what they need.",
   },
   {
-    question: "Do I keep my business number?",
-    answer: "Yes. You keep your existing number. Callers dial you like normal — they just reach CallCrew when forwarding is on.",
+    question: "Will my customers know it is AI?",
+    answer:
+      "Most callers simply experience a polite receptionist that listens and asks the right questions. You control the greeting and instructions so it sounds like your business, not a tech company.",
   },
   {
-    question: "Can it transfer calls to me?",
-    answer: "Yes. You can set rules for urgent calls or specific callers to be transferred directly to your cell phone.",
+    question: "How quickly can I set it up?",
+    answer:
+      "Most small businesses are live in under 15 minutes. You choose your greeting, basic questions, and where summaries should be sent. Then you turn on call forwarding from your existing number.",
   },
   {
-    question: "What if it does not know the answer?",
-    answer: "CallCrew will let the caller know it will have someone get back to them, capture their info, and send you the summary so you can follow up.",
+    question: "Do I keep my existing business number?",
+    answer:
+      "Yes. You keep your current number. Callers dial you like normal — they just reach CallCrew when call forwarding is turned on.",
   },
   {
-    question: "Can I use it 24/7 or just certain hours?",
-    answer: "Either. Forward calls whenever you want — lunch, after hours, weekends, or all day. Turn forwarding off when you want to answer yourself.",
+    question: "Can I use it 24/7 or only certain hours?",
+    answer:
+      "You decide when CallCrew picks up. Many businesses use it for lunch, after hours, or weekends. Others forward all calls and let CallCrew handle everything.",
   },
   {
     question: "How fast do I get the summary?",
-    answer: "Summaries are sent within seconds of the call ending. You choose text message, email, or both.",
+    answer:
+      "Summaries are sent within seconds of the call ending. You choose text message, email, or both so your team can follow up quickly.",
   },
 ];
 
@@ -609,10 +621,11 @@ export function FinalCTA() {
     <section id="request-demo" className="py-20 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 text-center">
         <h2 className="text-3xl sm:text-4xl font-bold mb-4">
-          Your first AI employee — live in minutes.
+          Stop letting good calls slip away.
         </h2>
         <p className="text-lg text-slate-400 mb-8 max-w-xl mx-auto">
-          Stop missing calls. Start capturing every lead.
+          Turn missed calls into booked work, new patients, or signed clients. Try CallCrew and see how much calmer your
+          phone can feel.
         </p>
 
         <div className="flex flex-col sm:flex-row gap-3 justify-center mb-10">
