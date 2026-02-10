@@ -637,7 +637,7 @@ export function FinalCTA() {
             <ArrowRight className="w-4 h-4" />
           </Link>
           <a
-            href="#request-demo"
+            href="/onboarding?source=demo"
             id="request-demo"
             className="inline-flex items-center justify-center px-6 py-3.5 text-base font-medium text-white border border-slate-600 rounded-lg hover:bg-slate-800 transition-colors"
           >

@@ -13,10 +13,31 @@ const twilioVoiceWebhook = require('./webhooks/twilioVoice');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware: CORS for frontend at https://www.callcrew.ai only
-const allowedOrigin = process.env.CORS_ORIGIN || 'https://www.callcrew.ai';
+// Middleware: CORS
+// In production we explicitly allow:
+// - https://www.callcrew.ai
+// - https://callcrew.ai
+// Additional origins can be configured via CORS_ORIGIN (comma-separated).
+const defaultAllowedOrigins = ['https://www.callcrew.ai', 'https://callcrew.ai'];
+const envOrigins = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(',').map(o => o.trim()).filter(Boolean)
+  : [];
+const configuredOrigins = envOrigins.length > 0 ? envOrigins : defaultAllowedOrigins;
+
 app.use(cors({
-  origin: allowedOrigin,
+  origin: (origin, callback) => {
+    // Allow non-browser / same-origin requests with no Origin header
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    if (configuredOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    console.warn(`[CORS] Blocked origin: ${origin}`);
+    return callback(new Error('CORS: Origin not allowed'), false);
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true

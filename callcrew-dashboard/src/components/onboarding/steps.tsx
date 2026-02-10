@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Building2,
@@ -481,6 +481,9 @@ function Step3Customize({ data, onChange }: {
 }) {
   const [playingVoice, setPlayingVoice] = useState<string | null>(null);
   const [editingFaq, setEditingFaq] = useState<number | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const API_URL = typeof window !== "undefined" ? getApiBase() : "";
 
   const defaultGreeting = `Thank you for calling ${data.businessName || "[Your Business]"}! How can I help you today?`;
 
@@ -490,10 +493,62 @@ function Step3Customize({ data, onChange }: {
     onChange({ faqs: newFaqs });
   };
 
-  const handlePlayVoice = (voiceId: string) => {
-    // Placeholder for voice preview functionality
-    setPlayingVoice(voiceId);
-    setTimeout(() => setPlayingVoice(null), 2000);
+  const handlePlayVoice = async (voiceId: string) => {
+    if (!API_URL) {
+      console.error("[voice-preview] API base URL is not configured");
+      return;
+    }
+
+    const text = data.greeting || defaultGreeting;
+
+    try {
+      setPlayingVoice(voiceId);
+
+      // Stop any currently playing audio
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+
+      const response = await fetch(`${API_URL}/api/onboarding/voice-preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text,
+          voiceType: voiceId,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error("[voice-preview] Request failed:", response.status, errorText);
+        setPlayingVoice(null);
+        return;
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audioRef.current = audio;
+
+      audio.onended = () => {
+        setPlayingVoice(null);
+        URL.revokeObjectURL(url);
+        audioRef.current = null;
+      };
+
+      audio.onerror = (event) => {
+        console.error("[voice-preview] Audio playback error:", event);
+        setPlayingVoice(null);
+        URL.revokeObjectURL(url);
+        audioRef.current = null;
+      };
+
+      await audio.play();
+    } catch (error) {
+      console.error("[voice-preview] Unexpected error:", error);
+      setPlayingVoice(null);
+    }
   };
 
   return (

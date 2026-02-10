@@ -5,6 +5,7 @@ const mongoose = require('mongoose');
 const Business = require('../models/Business');
 const IndustryTemplate = require('../models/IndustryTemplate');
 const NotificationRecipient = require('../models/NotificationRecipient');
+const openaiService = require('../services/openaiService');
 const numberProvisioningService = require('../services/numberProvisioningService');
 
 /**
@@ -148,7 +149,8 @@ router.post('/create', async (req, res) => {
     const template = await IndustryTemplate.getBySlug(industry);
 
     // AUTOMATIC PHONE PROVISIONING
-    // If no phone number was selected, search for and provision one (local → toll-free)
+    // If no phone number was selected, search for and provision one (local → toll-free).
+    // IMPORTANT: If provisioning fails, we abort onboarding and return a clear error.
     let provisionedNumber = null;
     const baseUrl = process.env.BASE_URL || process.env.WEBHOOK_BASE_URL;
 
@@ -164,7 +166,8 @@ router.post('/create', async (req, res) => {
         }
         console.log('[onboarding] Provisioned selected number:', provisionedNumber?.phoneNumber);
       } catch (err) {
-        console.error('[onboarding] Failed to provision selected number:', err?.message || err);
+        console.error('[onboarding] Failed to provision selected number:', err);
+        throw new Error(`Twilio provisioning failed for selected number: ${err.message || err}`);
       }
     } else {
       try {
@@ -179,9 +182,11 @@ router.post('/create', async (req, res) => {
           console.log('[onboarding] Auto-provisioned number:', provisionedNumber.phoneNumber);
         } else {
           console.warn('[onboarding] No Twilio numbers available (local or toll-free)');
+          throw new Error('No Twilio phone numbers are currently available for provisioning');
         }
       } catch (err) {
-        console.error('[onboarding] Provisioning failed:', err?.message || err);
+        console.error('[onboarding] Provisioning failed:', err);
+        throw new Error(`Twilio auto-provisioning failed: ${err.message || err}`);
       }
     }
 
@@ -255,7 +260,10 @@ router.post('/create', async (req, res) => {
   } catch (error) {
     await session.abortTransaction();
     console.error('Error creating business:', error);
-    res.status(500).json({ success: false, error: 'Failed to create business: ' + error.message });
+    res.status(500).json({
+      success: false,
+      error: 'Failed to create business: ' + (error.message || 'Unknown error')
+    });
   } finally {
     session.endSession();
   }
@@ -303,6 +311,35 @@ router.put('/:id/complete', async (req, res) => {
   } catch (error) {
     console.error('Error completing onboarding:', error);
     res.status(500).json({ success: false, error: 'Failed to complete onboarding' });
+  }
+});
+
+/**
+ * POST /api/onboarding/voice-preview
+ * Generate a short audio preview of the assistant's greeting using TTS.
+ */
+router.post('/voice-preview', async (req, res) => {
+  try {
+    const { text, voiceType } = req.body || {};
+
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Text is required for voice preview'
+      });
+    }
+
+    const { buffer, contentType } = await openaiService.generateSpeech(text, voiceType);
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'no-store');
+    return res.send(buffer);
+  } catch (error) {
+    console.error('[onboarding] Voice preview failed:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to generate voice preview: ' + (error.message || 'Unknown error')
+    });
   }
 });
 

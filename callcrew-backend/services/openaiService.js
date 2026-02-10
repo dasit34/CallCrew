@@ -8,6 +8,70 @@ class OpenAIService {
   }
 
   /**
+   * Generate speech audio for a short text snippet (e.g., voice preview).
+   * Returns a Buffer with audio data and content type.
+   */
+  async generateSpeech(text, voiceType = 'nova') {
+    try {
+      this.initialize();
+    } catch (initError) {
+      console.error('=== OPENAI TTS INIT FAILED ===');
+      console.error('Error:', initError.message);
+      console.error('==============================');
+      throw initError;
+    }
+
+    const trimmedText = (text || '').toString().trim();
+    if (!trimmedText) {
+      throw new Error('No text provided for speech synthesis');
+    }
+
+    // Keep previews short to minimize latency and cost
+    const input = trimmedText.slice(0, 400);
+    const voice = TTS_VOICES[voiceType] || TTS_VOICES.nova || 'nova';
+
+    console.log('=== OPENAI TTS REQUEST ===');
+    console.log('Model:', TTS_MODEL);
+    console.log('Voice:', voice);
+    console.log('Text length:', input.length);
+    console.log('Preview text:', input.substring(0, 120) + (input.length > 120 ? '...' : ''));
+    console.log('==========================');
+
+    try {
+      const startTime = Date.now();
+      const response = await this.client.audio.speech.create({
+        model: TTS_MODEL,
+        voice,
+        input,
+        format: 'mp3'
+      });
+
+      const arrayBuffer = await response.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+      const durationMs = Date.now() - startTime;
+
+      console.log('=== OPENAI TTS RESPONSE ===');
+      console.log('Bytes:', buffer.length);
+      console.log('Duration:', durationMs + 'ms');
+      console.log('===========================');
+
+      return {
+        buffer,
+        contentType: 'audio/mpeg'
+      };
+    } catch (error) {
+      console.error('=== OPENAI TTS ERROR ===');
+      console.error('Error Type:', error.constructor?.name);
+      console.error('Error Message:', error.message);
+      console.error('Error Status:', error.status);
+      console.error('Error Code:', error.code);
+      console.error('Full Error:', JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
+      console.error('=========================');
+      throw new Error(`Failed to generate speech: ${error.message}`);
+    }
+  }
+
+  /**
    * Initialize the OpenAI client
    */
   initialize() {
