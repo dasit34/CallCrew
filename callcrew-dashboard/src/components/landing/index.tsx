@@ -140,19 +140,22 @@ export function Hero() {
 
           {/* Headline */}
           <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-slate-900 tracking-tight leading-[1.1] mb-6">
-            Stop missing calls.
-            <br />
-            <span className="text-blue-600">Turn CallCrew on when you want.</span>
+            Every missed call is missed revenue.
           </h1>
 
           {/* Subheadline */}
           <p className="text-lg sm:text-xl text-slate-600 leading-relaxed mb-8 max-w-2xl">
-            CallCrew answers your business calls, captures lead info, and sends you a summary by text or email. 
-            Forward calls when you are busy, after hours, or all day. Turn it off anytime.
+            CallCrew is your AI receptionist that answers business calls, captures leads, and sends you instant
+            summaries — even when you are busy, after hours, or off the clock.
+          </p>
+
+          {/* Supporting line */}
+          <p className="text-sm sm:text-base text-slate-500 mb-6 max-w-2xl">
+            Built for small businesses, service providers, and solo operators who can&apos;t afford to miss opportunities.
           </p>
 
           {/* CTAs */}
-          <div className="flex flex-col sm:flex-row gap-3 mb-6">
+          <div className="flex flex-col sm:flex-row gap-3 mb-4">
             <Link
               href="/onboarding"
               className="inline-flex items-center justify-center gap-2 px-6 py-3.5 text-base font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors shadow-sm"
@@ -164,9 +167,25 @@ export function Hero() {
               href="#request-demo"
               className="inline-flex items-center justify-center px-6 py-3.5 text-base font-medium text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 hover:border-slate-400 transition-colors"
             >
-              Request a demo
+              See how it works
             </a>
           </div>
+
+          {/* Supporting bullets */}
+          <ul className="flex flex-col sm:flex-row gap-2 sm:gap-6 mb-6 text-sm text-slate-600">
+            <li className="flex items-center gap-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
+              <span>Answers calls when you cannot</span>
+            </li>
+            <li className="flex items-center gap-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
+              <span>Captures caller info and intent</span>
+            </li>
+            <li className="flex items-center gap-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
+              <span>Sends summaries by text or email instantly</span>
+            </li>
+          </ul>
 
           {/* Micro-line */}
           <p className="text-sm text-slate-500 flex items-center gap-2">
