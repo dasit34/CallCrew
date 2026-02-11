@@ -2,7 +2,6 @@
 // This uses a SEPARATE LLM "judge" from the assistant model.
 // It never modifies production prompts or behavior automatically.
 
-import OpenAI from "openai";
 import {
   SimulationResult,
   EvaluationResult,
@@ -23,13 +22,32 @@ const DIMENSION_WEIGHTS: Readonly<Record<keyof DimensionScores, number>> = {
   userFriction: 0.1,
 };
 
-function getOpenAIClient(): OpenAI | null {
+function getOpenAIClient(): any | null {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    console.warn("[simulator] OPENAI_API_KEY not set – evaluateTranscript will be a no-op.");
+    if (process.env.DEBUG === "1") {
+      // eslint-disable-next-line no-console
+      console.error("[simulator] OPENAI_API_KEY not set – evaluateTranscript will be a no-op.");
+    }
     return null;
   }
-  return new OpenAI({ apiKey });
+  let OpenAIConstructor: any;
+  try {
+    // Optional dependency: if not installed, evaluator will fall back to neutral scores.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const mod = require("openai");
+    OpenAIConstructor = mod.default || mod;
+  } catch (err) {
+    if (process.env.DEBUG === "1") {
+      // eslint-disable-next-line no-console
+      console.error(
+        "[simulator] 'openai' package not found – evaluateTranscript will fall back to neutral scores."
+      );
+    }
+    return null;
+  }
+
+  return new OpenAIConstructor({ apiKey });
 }
 
 function clampSubScore(value: any): number {
@@ -173,7 +191,10 @@ ${transcriptText}
     const match = raw.match(/\{[\s\S]*\}/);
     parsed = JSON.parse(match ? match[0] : raw);
   } catch (err) {
-    console.error("[simulator] Failed to parse judge JSON:", err);
+    if (process.env.DEBUG === "1") {
+      // eslint-disable-next-line no-console
+      console.error("[simulator] Failed to parse judge JSON:", err);
+    }
     parsed = {
       dimensionScores: {},
       failureTags: ["other"],

@@ -91,6 +91,7 @@ export type FailureCategory =
   | "handoff_problem"
   | "latency_or_hesitation"
   | "policy_violation"
+  | "runtime_error"
   | "other";
 
 export interface EvaluationSuggestion {
@@ -143,5 +144,14 @@ export interface StoredSimulationRun {
   evaluationSuggestions: EvaluationSuggestion[];
   endReason: SimulationEndReason;
   createdAt?: Date;
+  // Normalized evaluation object for internal analysis and querying
+  evaluation?: {
+    totalScore: number;
+    dimensionScores: DimensionScores;
+    failureTags: FailureCategory[];
+    missingData: string[];
+    concreteSuggestions: string[];
+  };
+  timestamp?: Date;
 }
 

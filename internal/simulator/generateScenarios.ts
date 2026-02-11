@@ -1,7 +1,6 @@
 // INTERNAL ONLY – Scenario generator for CallCrew assistant simulations.
 // This module is NOT used in production request handling.
 
-import OpenAI from "openai";
 import {
   SimulationScenario,
   ScenarioIntent,
@@ -12,15 +11,34 @@ import {
 
 const DEFAULT_MODEL = process.env.SIM_SCENARIO_MODEL || "gpt-4o-mini";
 
-function getOpenAIClient(): OpenAI | null {
+function getOpenAIClient(): any | null {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    console.warn(
-      "[simulator] OPENAI_API_KEY not set – generateScenarios will fall back to static scenarios."
-    );
+    if (process.env.DEBUG === "1") {
+      // eslint-disable-next-line no-console
+      console.error(
+        "[simulator] OPENAI_API_KEY not set – generateScenarios will fall back to static scenarios."
+      );
+    }
     return null;
   }
-  return new OpenAI({ apiKey });
+  let OpenAIConstructor: any;
+  try {
+    // Optional dependency: if not installed, we fall back to static scenarios.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const mod = require("openai");
+    OpenAIConstructor = mod.default || mod;
+  } catch (err) {
+    if (process.env.DEBUG === "1") {
+      // eslint-disable-next-line no-console
+      console.error(
+        "[simulator] 'openai' package not found – generateScenarios will fall back to static scenarios."
+      );
+    }
+    return null;
+  }
+
+  return new OpenAIConstructor({ apiKey });
 }
 
 export interface GenerateScenarioOptions {
@@ -43,8 +61,8 @@ export async function generateScenarios(
     return getFallbackScenarios(count, options);
   }
 
-  const businessName = options.businessName || "Acme Chiropractic Clinic";
-  const industry = options.industry || "chiropractic_clinic";
+  const businessName = options.businessName || "CallCrew Lunch-Hour Assistant";
+  const industry = options.industry || "small_business_receptionist";
 
   const systemPrompt = `
 You are generating test phone call scenarios for an AI phone receptionist called CallCrew.
@@ -79,8 +97,15 @@ Each item MUST have these fields:
 `;
 
   const userPrompt = `
-Generate ${count} diverse caller scenarios for business "${businessName}" in industry "${industry}".
-Focus on realistic small-business callers with missed-calls risk, scheduling, and pricing questions.
+Generate ${count} caller scenarios for business "${businessName}" in industry "${industry}".
+STRICTLY focus on one simple use case:
+- Small business lunch-hour or after-hours call
+- Goal: capture a reliable callback phone number and brief reason for calling
+
+All scenarios MUST:
+- Share the same assistant configuration (no branching flows)
+- Have successCriteria that explicitly require capturing the caller's phone number
+- Avoid complex multi-party or multi-day situations
 `.trim();
 
   const completion = await client.chat.completions.create({
@@ -98,7 +123,10 @@ Focus on realistic small-business callers with missed-calls risk, scheduling, an
     const match = raw.match(/\[[\s\S]*\]/);
     parsed = JSON.parse(match ? match[0] : raw);
   } catch (err) {
-    console.error("[simulator] Failed to parse scenario JSON from LLM, falling back:", err);
+    if (process.env.DEBUG === "1") {
+      // eslint-disable-next-line no-console
+      console.error("[simulator] Failed to parse scenario JSON from LLM, falling back:", err);
+    }
     return getFallbackScenarios(count, options);
   }
 

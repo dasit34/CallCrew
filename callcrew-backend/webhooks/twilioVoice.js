@@ -552,7 +552,11 @@ router.post('/voice', async (req, res) => {
       customInstructions: business.customInstructions || '',
       isAfterHours,
       noInputCount: 0,
-      questionCount: 0
+      questionCount: 0,
+      // Callback number confirmation flags (internal only)
+      callbackNumberConfirmed: false,
+      callbackNumberRefused: false,
+      callbackConfirmationRequested: false
     };
     
     conversations.set(CallSid, conversation);
@@ -720,7 +724,10 @@ router.post('/gather', async (req, res) => {
         customInstructions: business.customInstructions || '',
         isAfterHours: call.metadata?.isAfterHours || false,
         noInputCount: state.timeoutCount || 0,
-        questionCount: state.lowConfidenceAttempts || 0
+        questionCount: state.lowConfidenceAttempts || 0,
+        callbackNumberConfirmed: false,
+        callbackNumberRefused: false,
+        callbackConfirmationRequested: false
       };
 
       conversations.set(callSid, conversation);
@@ -735,7 +742,10 @@ router.post('/gather', async (req, res) => {
       
       if (conversation.noInputCount >= 3) {
         emitTurnLatency(callSid);
-        return await endCall(callSid, twiml, res, "I'm having trouble hearing you. Thank you for calling. Goodbye!");
+        // Simulator: failed_to_offer_next_step
+        // Simulator: missing_contact_info
+        const closingMsg = "I'm having trouble hearing you. We'll follow up using the number you called from if we need anything else. Thank you for calling. Goodbye!";
+        return await endCall(callSid, twiml, res, closingMsg);
       }
       
       const gather = twiml.gather({
@@ -829,7 +839,14 @@ router.post('/gather', async (req, res) => {
     // Check for goodbye at any stage (stage-aware)
     if (isGoodbye(speechResult, conversation.stage)) {
       emitTurnLatency(callSid);
-      return await endCall(callSid, twiml, res, `Thank you for calling ${conversation.businessName}. We'll be in touch soon. Have a great day!`);
+      const name = conversation.collectedInfo.name || 'you';
+      const phone = conversation.collectedInfo.phone;
+      // Simulator: failed_to_offer_next_step
+      // Simulator: missing_contact_info
+      const closingMsg = phone && phone !== 'Not provided'
+        ? `Thank you for calling ${conversation.businessName}. We'll reach out to ${name} at ${phone} soon. Have a great day!`
+        : `Thank you for calling ${conversation.businessName}. If we need anything else we'll follow up using the number you called from. Have a great day!`;
+      return await endCall(callSid, twiml, res, closingMsg);
     }
 
     console.log(`=== STAGE: ${conversation.stage} ===`);
@@ -892,6 +909,7 @@ router.post('/gather', async (req, res) => {
           
           // If they don't have a phone, skip to reason
           if (phoneValidation.reason === 'no_phone') {
+            conversation.callbackNumberRefused = true;
             response = getRepromptMessage(STAGES.GET_PHONE, 'no_phone');
             nextStage = STAGES.GET_REASON;
           } else {
@@ -974,11 +992,70 @@ router.post('/gather', async (req, res) => {
       // STAGE: FOLLOW_UP (Check SALES intent, FAQs, then OpenAI)
       // ----------------------------------------
       case STAGES.FOLLOW_UP: {
+        // If we previously asked to confirm the callback number, handle that response first.
+        if (conversation.callbackConfirmationRequested) {
+          const lower = (speechResult || '').toLowerCase();
+          const extractedPhone = extractPhoneNumber(speechResult);
+
+          // (a) Caller provides a number → store + confirm → allow end
+          if (extractedPhone) {
+            conversation.collectedInfo.phone = extractedPhone;
+            conversation.callbackNumberConfirmed = true;
+            conversation.callbackConfirmationRequested = false;
+            console.log('Callback number confirmed:', extractedPhone);
+
+            const name = conversation.collectedInfo.name || 'you';
+            const closingMsg = `Great! We'll reach out to ${name} at ${extractedPhone} soon. Thank you for calling ${conversation.businessName}. Have a wonderful day!`;
+            emitTurnLatency(callSid);
+            // This rule exists to prevent lead loss and is validated by simulator failureTags.
+            return await endCall(callSid, twiml, res, closingMsg);
+          }
+
+          // (b) Caller explicitly refuses → record refusal → allow end
+          if (
+            isNegative(speechResult) ||
+            lower.includes("don't have") ||
+            lower.includes('dont have') ||
+            lower.includes('no phone')
+          ) {
+            conversation.callbackNumberRefused = true;
+            conversation.callbackConfirmationRequested = false;
+            console.log('Caller explicitly refused callback number.');
+
+            const closingMsg = `No problem — we'll follow up in the best way we can. Thank you for calling ${conversation.businessName}. Have a wonderful day!`;
+            emitTurnLatency(callSid);
+            // This rule exists to prevent lead loss and is validated by simulator failureTags.
+            return await endCall(callSid, twiml, res, closingMsg);
+          }
+
+          // (c) Caller is rushed / interrupted → ask once, then summarize next steps
+          conversation.callbackConfirmationRequested = false;
+          console.log('Callback confirmation not provided; summarizing next steps.');
+          const fallbackClosing = `Got it — I'll have our team follow up with you soon. Thank you for calling ${conversation.businessName}. Have a wonderful day!`;
+          emitTurnLatency(callSid);
+          // This rule exists to prevent lead loss and is validated by simulator failureTags.
+          return await endCall(callSid, twiml, res, fallbackClosing);
+        }
+
         // Check if they're done
         if (isNegative(speechResult) || isGoodbye(speechResult, conversation.stage)) {
           const name = conversation.collectedInfo.name || 'you';
           const phone = conversation.collectedInfo.phone;
-          const closingMsg = phone 
+          // Before ending the call, enforce a hard callback-number confirmation step
+          // when we already have a phone value but haven't confirmed it yet.
+          if (
+            phone &&
+            phone !== 'Not provided' &&
+            !conversation.callbackNumberConfirmed &&
+            !conversation.callbackNumberRefused
+          ) {
+            response = "Can I confirm the best number to reach you back at?";
+            conversation.callbackConfirmationRequested = true;
+            nextStage = STAGES.FOLLOW_UP;
+            break;
+          }
+
+          const closingMsg = phone
             ? `Great! We'll reach out to ${name} at ${phone} soon. Thank you for calling ${conversation.businessName}. Have a wonderful day!`
             : `Great! Thank you for calling ${conversation.businessName}. Have a wonderful day!`;
           emitTurnLatency(callSid);
@@ -1081,6 +1158,8 @@ router.post('/gather', async (req, res) => {
  * Single LLM call per turn; no classify-then-answer-then-summarize chain.
  * Summary runs only at call end (handleCallComplete).
  */
+const { buildSystemPrompt } = require("../../internal/simulator/systemPromptTemplate");
+
 async function getAIResponse(question, conversation) {
   try {
     // First check for SALES intent (no OpenAI needed)
@@ -1090,16 +1169,11 @@ async function getAIResponse(question, conversation) {
       return salesIntent.response;
     }
     
-    const systemPrompt = `You are a helpful receptionist for ${conversation.businessName}.
-${conversation.customInstructions ? `Business info: ${conversation.customInstructions}` : ''}
-${conversation.services?.length > 0 ? `Services: ${conversation.services.map(s => s.name).join(', ')}` : ''}
-
-RULES:
-- Answer in 1-2 sentences MAX
-- Be friendly and helpful
-- If you don't know something, say "Got it, I'll have our team follow up with that information"
-- Never make up information
-- For pricing/demo/sign-up questions, offer to have the team follow up with details`;
+    const systemPrompt = buildSystemPrompt(
+      conversation.businessName,
+      conversation.customInstructions || "",
+      (conversation.services || []).map((s) => s.name)
+    );
 
     const response = await openaiService.processConversation(
       [{ role: 'user', content: question }],

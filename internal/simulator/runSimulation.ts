@@ -22,6 +22,8 @@ import {
 // The assistant behavior MUST be identical to live calls.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const openaiService = require("../../callcrew-backend/services/openaiService");
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { buildSystemPrompt } = require("./systemPromptTemplate");
 
 interface RunSimulationOptions {
   assistantVersion?: string;
@@ -29,29 +31,14 @@ interface RunSimulationOptions {
 
 /**
  * Build system prompt using the EXACT same logic as production's getAIResponse function.
- * Production code: callcrew-backend/webhooks/twilioVoice.js:1084-1102
- * This ensures the simulation uses identical prompt construction as live calls.
+ * Delegates to the shared systemPromptTemplate used by production.
  */
 function buildSystemPromptForScenario(scenario: SimulationScenario): string {
-  // Match production's inline prompt building exactly (twilioVoice.js:1093-1102)
   const businessName = scenario.businessName;
   const customInstructions = scenario.notes || "";
-  const services = scenario.persona.company
-    ? [{ name: scenario.persona.company }]
-    : [];
+  const services: string[] = scenario.persona.company ? [scenario.persona.company] : [];
 
-  const systemPrompt = `You are a helpful receptionist for ${businessName}.
-${customInstructions ? `Business info: ${customInstructions}` : ""}
-${services.length > 0 ? `Services: ${services.map((s) => s.name).join(", ")}` : ""}
-
-RULES:
-- Answer in 1-2 sentences MAX
-- Be friendly and helpful
-- If you don't know something, say "Got it, I'll have our team follow up with that information"
-- Never make up information
-- For pricing/demo/sign-up questions, offer to have the team follow up with details`;
-
-  return systemPrompt;
+  return buildSystemPrompt(businessName, customInstructions, services);
 }
 
 /**

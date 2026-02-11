@@ -5,8 +5,9 @@
     "node": ">=20.9.0"
   },
   "scripts": {
-    "build": "npm --prefix callcrew-dashboard ci && npm --prefix callcrew-dashboard run build",
-    "start": "npm --prefix callcrew-dashboard run start",
-    "dev": "npm --prefix callcrew-dashboard run dev"
+  "build": "npm --prefix callcrew-dashboard ci && npm --prefix callcrew-dashboard run build",
+  "start": "npm --prefix callcrew-dashboard run start",
+  "dev": "npm --prefix callcrew-dashboard run dev",
+  "sim:batch": "npm --prefix callcrew-backend run sim:batch"
   }
 }

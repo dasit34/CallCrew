@@ -1,6 +1,7 @@
 // INTERNAL ONLY – batch orchestrator for CallCrew simulations.
 // Can be used from a CLI script or a protected internal endpoint.
 // Does NOT handle any live customer traffic.
+// To run from backend: `cd callcrew-backend && npm run sim:batch`
 
 import { generateScenarios } from "./generateScenarios";
 import { runSimulation } from "./runSimulation";
@@ -33,27 +34,151 @@ export async function runBatchSimulation(
   count: number,
   config: SimulationConfig
 ): Promise<BatchRunResult> {
-  const scenarios = await generateScenarios(count);
+  // For baseline runs we typically use a single small-business / lunch-hour assistant configuration.
+  const scenarios = await generateScenarios(count, {
+    businessName: "CallCrew Small Business Receptionist",
+    industry: "small_business_lunch_hour",
+  });
   const simulations: SimulationResult[] = [];
   const evaluations: EvaluationResult[] = [];
 
   for (const scenario of scenarios) {
-    const simulation = await runSimulation(scenario, config);
-    simulations.push(simulation);
+    let simulation: SimulationResult;
+    let evaluation: EvaluationResult;
 
-    const evaluation = await evaluateSimulation(simulation);
-    evaluations.push(evaluation);
-
-    // Persist each run (best-effort; ignore storage errors)
     try {
-      await scoreAndStore(simulation, evaluation);
-    } catch (err) {
-      console.warn("[simulator] Failed to store simulation run:", err);
+      // Run simulation - wrap in try/catch to catch any unexpected errors
+      try {
+        simulation = await runSimulation(scenario, config);
+      } catch (simErr: any) {
+        // If runSimulation throws (shouldn't happen due to internal try/catch, but guard against it)
+        const now = new Date().toISOString();
+        simulation = {
+          scenario,
+          config,
+          transcript: [],
+          endReason: "error",
+          error: simErr?.message || String(simErr),
+          startedAt: now,
+          finishedAt: now,
+          assistantVersion: process.env.ASSISTANT_VERSION || "unknown",
+        };
+      }
+
+      simulations.push(simulation);
+
+      // Always attempt evaluation, even if simulation had errors
+      try {
+        evaluation = await evaluateSimulation(simulation);
+        // If simulation had a runtime error, ensure runtime_error tag is present
+        if (simulation.error || simulation.endReason === "error") {
+          if (!evaluation.failureTags.includes("runtime_error")) {
+            evaluation.failureTags.push("runtime_error");
+          }
+        }
+      } catch (evalErr: any) {
+        // If evaluation throws, create a minimal evaluation result with runtime_error tag
+        const errorMessage = evalErr?.message || String(evalErr);
+        evaluation = {
+          simulationId: scenario.id,
+          totalScore: 0,
+          dimensionScores: {
+            intentUnderstanding: 0,
+            requiredInfoCaptured: 0,
+            flowCorrectness: 0,
+            clarityConciseness: 0,
+            escalationCorrectness: 0,
+            userFriction: 0,
+          },
+          failureTags: ["runtime_error"],
+          missingData: [],
+          concreteSuggestions: [],
+          rawJudgeJson: JSON.stringify({
+            error: "Evaluation failed",
+            message: process.env.DEBUG === "1" ? errorMessage : undefined,
+          }),
+        };
+      }
+
+      evaluations.push(evaluation);
+
+      // Persist each run (best-effort; ignore storage errors)
+      try {
+        await scoreAndStore(simulation, evaluation);
+      } catch (err) {
+        // Storage failures are non-fatal; continue batch
+      }
+    } catch (fatalErr: any) {
+      // This catch block should only trigger for truly unexpected fatal errors
+      // that prevent us from creating minimal results. Re-throw to fail the batch.
+      throw fatalErr;
     }
   }
 
   const summary = summarizeBatch(scenarios, simulations, evaluations);
   return { scenarios, simulations, evaluations, summary };
+}
+
+/**
+ * CLI entrypoint for running a small baseline batch and printing a single JSON summary.
+ * This is intentionally minimal so it can be used in CI/regression checks.
+ */
+async function main() {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error(
+      "[simulator] OPENAI_API_KEY is required to run simulations. Please set it in your environment."
+    );
+  }
+
+  const BATCH_SIZE = 5;
+  const { simulations, evaluations, summary } = await runBatchSimulation(BATCH_SIZE, {
+    maxTurns: 6,
+  });
+
+  // Aggregate failureTags, missingData, and concreteSuggestions across evaluations
+  const failureTagCounts: Record<string, number> = {};
+  const missingDataCounts: Record<string, number> = {};
+  const suggestionCounts: Record<string, number> = {};
+
+  for (const e of evaluations) {
+    for (const tag of e.failureTags) {
+      failureTagCounts[tag] = (failureTagCounts[tag] || 0) + 1;
+    }
+    for (const field of e.missingData) {
+      missingDataCounts[field] = (missingDataCounts[field] || 0) + 1;
+    }
+    for (const suggestion of e.concreteSuggestions) {
+      suggestionCounts[suggestion] = (suggestionCounts[suggestion] || 0) + 1;
+    }
+  }
+
+  const topSuggestions = Object.entries(suggestionCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([text, count]) => ({ text, count }));
+
+  // Basic health checks for missing fields / crashes
+  const runsWithErrors = simulations.filter((s) => s.error).length;
+  const evalsMissingScores = evaluations.filter(
+    (e) => typeof e.totalScore !== "number" || !e.dimensionScores
+  ).length;
+
+  const summaryPayload = {
+    label: "baseline",
+    totalRuns: summary.totalRuns,
+    averageTotalScore: summary.averageScore,
+    failureTagCounts,
+    missingDataCounts,
+    topSuggestions,
+    health: {
+      runsWithErrors,
+      evalsMissingScores,
+    },
+  };
+
+  // IMPORTANT: single structured line for downstream tools
+  // eslint-disable-next-line no-console
+  console.log(JSON.stringify(summaryPayload, null, 2));
 }
 
 function summarizeBatch(
@@ -92,6 +217,7 @@ function summarizeBatch(
     handoff_problem: 0,
     latency_or_hesitation: 0,
     policy_violation: 0,
+    runtime_error: 0,
     other: 0,
   };
 
@@ -122,26 +248,11 @@ function summarizeBatch(
   };
 }
 
-// Optional CLI entrypoint (internal use only).
-// Example:
-//   ts-node internal/simulator/runBatchSimulation.ts 20
 if (require.main === module) {
-  const n = Number(process.argv[2] || "10");
-  runBatchSimulation(n, { maxTurns: 6 }).then((result) => {
+  main().catch((err) => {
     // eslint-disable-next-line no-console
-    console.log(
-      JSON.stringify(
-        {
-          totalRuns: result.summary.totalRuns,
-          averageScore: result.summary.averageScore,
-          worstTenPercent: result.summary.worstTenPercent,
-          failureCategoryCounts: result.summary.failureCategoryCounts,
-        },
-        null,
-        2
-      )
-    );
-    process.exit(0);
+    console.error(err);
+    process.exit(1);
   });
 }
 
